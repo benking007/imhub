@@ -14,8 +14,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "dev": "bun run --watch src/cli.ts",
-    "start": "bun run src/cli.ts",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
     "test": "echo \"No tests yet\"",
     "test:coverage": "bun test --coverage",
     "lint": "biome check .",
