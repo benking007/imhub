@@ -1,6 +1,6 @@
 {
   "name": "bot-hub",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Universal messenger-to-agent bridge — connect WeChat/Feishu/Telegram to Claude Code/Codex/Copilot",
   "type": "module",
   "bin": {
@@ -22,7 +22,15 @@
     "format": "biome format . --write",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["wechat", "claude-code", "codex", "copilot", "bot", "agent", "bridge"],
+  "keywords": [
+    "wechat",
+    "claude-code",
+    "codex",
+    "copilot",
+    "bot",
+    "agent",
+    "bridge"
+  ],
   "author": "Jerry",
   "license": "MIT",
   "repository": {
