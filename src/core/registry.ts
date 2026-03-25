@@ -70,6 +70,9 @@ class PluginRegistry {
     const { telegramAdapter } = await import('../plugins/messengers/telegram/telegram-adapter.js')
     this.registerMessenger(telegramAdapter)
 
+    const { feishuAdapter } = await import('../plugins/messengers/feishu/index.js')
+    this.registerMessenger(feishuAdapter)
+
     // Load built-in agents
     const { claudeCodeAdapter } = await import('../plugins/agents/claude-code/index.js')
     this.registerAgent(claudeCodeAdapter)

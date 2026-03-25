@@ -17,6 +17,11 @@ interface Config {
   messengers: string[]
   agents: string[]
   defaultAgent: string
+  telegram?: { botToken: string }
+  feishu?: {
+    appId: string
+    appSecret: string
+  }
   [key: string]: unknown
 }
 
@@ -156,7 +161,18 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     if (typeof result === 'string') {
       console.log(`[handleMessage] Sending string response:`, result.substring(0, 100))
       await stopTyping()
-      await messenger.sendMessage(message.threadId, result)
+
+      // For Feishu, use cards for better formatting
+      if (platform === 'feishu' && messenger.sendCard) {
+        const { CardBuilder } = await import('./plugins/messengers/feishu/card-builder.js')
+        const card = new CardBuilder()
+          .addMarkdown(result)
+          .addAgentBadge(ctx.session?.agent || defaultAgent)
+          .build()
+        await messenger.sendCard(message.threadId, card)
+      } else {
+        await messenger.sendMessage(message.threadId, result)
+      }
     } else {
       // Stream response chunks
       console.log(`[handleMessage] Streaming response...`)
@@ -170,7 +186,22 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
 
       if (fullResponse) {
         console.log(`[handleMessage] Full response length:`, fullResponse.length)
-        await messenger.sendMessage(message.threadId, fullResponse)
+
+        // For Feishu, use cards with action buttons
+        if (platform === 'feishu' && messenger.sendCard) {
+          const { CardBuilder } = await import('./plugins/messengers/feishu/card-builder.js')
+          const card = new CardBuilder()
+            .addMarkdown(fullResponse)
+            .addButtons([
+              { text: 'Continue', type: 'primary', value: { action: 'continue', threadId: message.threadId } },
+              { text: 'Stop', type: 'danger', value: { action: 'stop', threadId: message.threadId } }
+            ])
+            .addAgentBadge(ctx.session?.agent || defaultAgent)
+            .build()
+          await messenger.sendCard(message.threadId, card)
+        } else {
+          await messenger.sendMessage(message.threadId, fullResponse)
+        }
       } else {
         console.log(`[handleMessage] No response generated`)
       }
@@ -194,6 +225,7 @@ program
       console.log('\nMessengers:')
       console.log('  wechat   - WeChat adapter')
       console.log('  telegram - Telegram adapter')
+      console.log('  feishu   - Feishu/Lark adapter')
       console.log('\nAgents:')
       console.log('  claude   - Claude Code agent')
       console.log('  codex    - OpenAI Codex CLI agent')
@@ -311,6 +343,53 @@ program
         }
 
         console.log('✅ Telegram bot token saved')
+        break
+
+      case 'feishu':
+        console.log('📱 Configuring Feishu adapter (WebSocket long polling mode)...')
+        console.log('To create a Feishu bot:')
+        console.log('1. Go to https://open.feishu.cn/app')
+        console.log('2. Create a custom bot app')
+        console.log('3. Enable Bot capability')
+        console.log('4. Configure event subscriptions (Subscribe to "Receive Message" event)')
+        console.log('5. Copy App ID and App Secret\n')
+
+        const { createInterface: createRl } = await import('readline')
+        const feishuRl = createRl({
+          input: process.stdin,
+          output: process.stdout,
+        })
+
+        const appId = await new Promise<string>((resolve) => {
+          feishuRl.question('Enter App ID: ', (answer) => {
+            resolve(answer.trim())
+          })
+        })
+
+        const appSecret = await new Promise<string>((resolve) => {
+          feishuRl.question('Enter App Secret: ', (answer) => {
+            resolve(answer.trim())
+          })
+        })
+
+        feishuRl.close()
+
+        if (!appId || !appSecret) {
+          console.log('❌ App ID and App Secret are required')
+          return
+        }
+
+        config.feishu = {
+          appId,
+          appSecret
+        }
+        if (!config.messengers.includes('feishu')) {
+          config.messengers.push('feishu')
+        }
+
+        console.log('✅ Feishu bot credentials saved')
+        console.log(`\n✅ Using WebSocket long polling mode - no webhook configuration needed!`)
+        console.log(`   The bot will automatically connect to Feishu servers.`)
         break
 
       default:

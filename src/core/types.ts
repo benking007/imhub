@@ -60,6 +60,12 @@ export interface MessengerAdapter {
    * @param isTyping - true to start typing indicator, false to stop
    */
   sendTyping?(threadId: string, isTyping: boolean): Promise<void>
+  /**
+   * Send an interactive card (Feishu only)
+   * @param threadId - The conversation thread ID
+   * @param card - The card JSON object
+   */
+  sendCard?(threadId: string, card: unknown): Promise<void>
 }
 
 /**

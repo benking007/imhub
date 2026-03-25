@@ -40,12 +40,30 @@ npm install -g im-hub
 im-hub config wechat
 # Scan the QR code with WeChat
 
+# OR configure Feishu (WebSocket long polling - no webhook needed!)
+im-hub config feishu
+# Enter App ID and App Secret from Feishu Open Platform
+
+# OR configure Telegram
+im-hub config telegram
+# Get bot token from @BotFather
+
 # 2. Configure Claude Code (optional, auto-detected)
 im-hub config claude
 
 # 3. Start the bridge
 im-hub start
 ```
+
+### Feishu Setup (WebSocket Long Polling)
+
+Feishu uses WebSocket long polling mode, which means:
+- ✅ No webhook configuration needed
+- ✅ No public IP or domain required
+- ✅ No ngrok or similar tools needed
+- ✅ Works directly from localhost
+
+Just configure your App ID and App Secret, then start the bridge. The bot will automatically connect to Feishu servers via WebSocket.
 
 ## Commands
 
@@ -89,8 +107,8 @@ hello                  # Send to default agent
 ┌─────────────────┐      ┌─────────────────┐
 │ Messenger Plugins│      │  Agent Plugins  │
 │ • wechat         │      │ • claude-code    │
-│ • feishu (v2)    │      │ • codex          │
-│ • telegram (v2)  │      │ • copilot        │
+│ • feishu ✓        │      │ • codex          │
+│ • telegram ✓      │      │ • copilot        │
 │                  │      │ • opencode       │
 └─────────────────┘      └─────────────────┘
 ```
@@ -168,9 +186,13 @@ npm start
 - [x] Basic command routing
 
 ### v0.2.0
-- [ ] Feishu adapter
-- [ ] Telegram adapter
+- [x] Feishu adapter
+- [x] Telegram adapter
 - [ ] Session persistence
+
+### v0.3.0
+- [ ] DingTalk adapter
+- [ ] Slack adapter
 
 ## License
 
