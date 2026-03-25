@@ -52,7 +52,7 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.changed == 'true'
-        run: npm publish --access public
+        run: npm publish --access public --provenance
 
       - name: Summary
         if: steps.version.outputs.changed == 'true'
