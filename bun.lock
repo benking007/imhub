@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "bot-hub",
+      "name": "im-hub",
       "dependencies": {
         "commander": "^11.0.0",
       },

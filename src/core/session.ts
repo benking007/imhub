@@ -5,7 +5,7 @@ import { join } from 'path'
 import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
 import type { Session } from './types.js'
 
-const SESSIONS_DIR = join(homedir(), '.bot-hub', 'sessions')
+const SESSIONS_DIR = join(homedir(), '.im-hub', 'sessions')
 const DEFAULT_TTL = 30 * 60 * 1000 // 30 minutes
 const CLEANUP_INTERVAL = 5 * 60 * 1000 // 5 minutes
 

@@ -156,7 +156,7 @@ describe('SessionManager', () => {
   let testDir: string
 
   beforeEach(async () => {
-    testDir = join(tmpdir(), `bot-hub-test-${Date.now()}`)
+    testDir = join(tmpdir(), `im-hub-test-${Date.now()}`)
     manager = new TestableSessionManager(testDir)
     await manager.start()
   })

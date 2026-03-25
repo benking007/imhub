@@ -130,12 +130,12 @@ describe('routeMessage', () => {
   describe('command routing', () => {
     it('should return status message for /status', async () => {
       const result = await routeMessage({ type: 'command', command: 'status' }, ctx)
-      expect(result).toContain('Bot Hub Status')
+      expect(result).toContain('IM hub Status')
     })
 
     it('should return help message for /help', async () => {
       const result = await routeMessage({ type: 'command', command: 'help' }, ctx)
-      expect(result).toContain('Bot Hub Commands')
+      expect(result).toContain('IM hub Commands')
     })
 
     it('should return agents list for /agents', async () => {

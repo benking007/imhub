@@ -136,7 +136,7 @@ export class ILinkClient {
       msg: {
         from_user_id: '',
         to_user_id: toUserId,
-        client_id: `bot-hub:${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        client_id: `im-hub:${Date.now()}-${Math.random().toString(36).slice(2)}`,
         message_type: 2, // BOT
         message_state: 2, // FINISH
         context_token: contextToken,

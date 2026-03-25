@@ -1,10 +1,10 @@
 {
-  "name": "bot-hub",
-  "version": "0.1.4",
+  "name": "im-hub",
+  "version": "0.1.5",
   "description": "Universal messenger-to-agent bridge — connect WeChat/Feishu/Telegram to Claude Code/Codex/Copilot",
   "type": "module",
   "bin": {
-    "bot-hub": "./dist/cli.js"
+    "im-hub": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -35,7 +35,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ceociocto/bot-hub"
+    "url": "https://github.com/ceociocto/im-hub"
   },
   "dependencies": {
     "commander": "^11.0.0"

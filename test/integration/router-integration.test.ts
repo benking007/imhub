@@ -149,10 +149,10 @@ function createRouter(registry: TestRegistry) {
   function handleBuiltInCommand(command: 'status' | 'help' | 'agents'): string {
     switch (command) {
       case 'status':
-        return `📊 Bot Hub Status\n\nPlatform: Connected\nAgent: Ready`
+        return `📊 IM hub Status\n\nPlatform: Connected\nAgent: Ready`
 
       case 'help':
-        return `📖 Bot Hub Commands\n\n/agents - List available agents\n/status - Show status\n/<agent> <prompt> - Switch agent`
+        return `📖 IM hub Commands\n\n/agents - List available agents\n/status - Show status\n/<agent> <prompt> - Switch agent`
 
       case 'agents':
         const agents = registry.listAgents()

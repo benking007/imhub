@@ -9,7 +9,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 
-const CREDENTIALS_FILE = join(homedir(), '.bot-hub', 'wechat-credentials.json')
+const CREDENTIALS_FILE = join(homedir(), '.im-hub', 'wechat-credentials.json')
 const POLL_TIMEOUT = 30000 // 30 seconds
 const CONTEXT_TOKEN_TTL = 5 * 60 * 1000 // 5 minutes
 
@@ -44,7 +44,7 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
       this.client.setCredentials(credentials)
       console.log('✅ WeChat credentials loaded from cache')
     } else {
-      throw new Error('No WeChat credentials found. Run "bot-hub config wechat" first.')
+      throw new Error('No WeChat credentials found. Run "im-hub config wechat" first.')
     }
 
     this.isRunning = true

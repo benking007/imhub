@@ -111,10 +111,10 @@ export async function routeMessage(
 function handleBuiltInCommand(command: 'status' | 'help' | 'agents'): string {
   switch (command) {
     case 'status':
-      return `📊 Bot Hub Status\n\nPlatform: Connected\nAgent: Ready\n\nSend a message to start!`
+      return `📊 IM hub Status\n\nPlatform: Connected\nAgent: Ready\n\nSend a message to start!`
 
     case 'help':
-      return `📖 Bot Hub Commands\n\n/agents - List available agents\n/status - Show connection status\n/<agent> <prompt> - Switch to agent and send prompt\n\nExample: /claude explain this code`
+      return `📖 IM hub Commands\n\n/agents - List available agents\n/status - Show connection status\n/<agent> <prompt> - Switch to agent and send prompt\n\nExample: /claude explain this code`
 
     case 'agents':
       const agents = registry.listAgents()

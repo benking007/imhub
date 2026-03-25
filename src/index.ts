@@ -1,4 +1,4 @@
-// bot-hub main entry point
+// im-hub main entry point
 
 export * from './core/types.js'
 export * from './core/registry.js'

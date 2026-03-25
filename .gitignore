@@ -26,4 +26,4 @@ coverage/
 .env.local
 
 # Sessions (runtime data)
-.bot-hub/
+.im-hub/

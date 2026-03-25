@@ -1,4 +1,4 @@
-// bot-hub core types
+// im-hub core types
 
 /**
  * Message received from a messenger platform
@@ -77,7 +77,7 @@ export interface AgentAdapter {
 }
 
 /**
- * Configuration for the bot-hub instance
+ * Configuration for the im-hub instance
  */
 export interface Config {
   messengers: string[]

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// bot-hub CLI
+// im-hub CLI
 
 import { program } from 'commander'
 import { homedir } from 'os'
@@ -10,7 +10,7 @@ import { sessionManager } from './core/session.js'
 import { parseMessage, routeMessage } from './core/router.js'
 import type { MessageContext } from './core/types.js'
 
-const CONFIG_DIR = join(homedir(), '.bot-hub')
+const CONFIG_DIR = join(homedir(), '.im-hub')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 
 interface Config {
@@ -39,15 +39,15 @@ async function saveConfig(config: Config): Promise<void> {
 }
 
 program
-  .name('bot-hub')
+  .name('im-hub')
   .description('Universal messenger-to-agent bridge')
   .version('0.0.1.0')
 
 program
   .command('start')
-  .description('Start the bot-hub server')
+  .description('Start the im-hub server')
   .action(async () => {
-    console.log('🚀 Starting bot-hub...')
+    console.log('🚀 Starting im-hub...')
 
     const config = await loadConfig()
     console.log(`Config loaded from ${CONFIG_FILE}`)
@@ -84,7 +84,7 @@ program
       }
     }
 
-    console.log('\n✅ Bot hub is running!')
+    console.log('\n✅ IM hub is running!')
     console.log('Press Ctrl+C to stop')
 
     // Keep process alive
@@ -196,7 +196,7 @@ program
       console.log('\nAgents:')
       console.log('  claude  - Claude Code agent')
       console.log('  codex   - OpenAI Codex CLI agent')
-      console.log('\nUsage: bot-hub config <component>')
+      console.log('\nUsage: im-hub config <component>')
       return
     }
 
@@ -281,7 +281,7 @@ program
 
       default:
         console.log(`Unknown component: ${component}`)
-        console.log('Run "bot-hub config" to see available components.')
+        console.log('Run "im-hub config" to see available components.')
         return
     }
 
@@ -296,7 +296,7 @@ program
     const agents = registry.listAgents()
     if (agents.length === 0) {
       console.log('No agents registered yet.')
-      console.log('Run "bot-hub config claude" to configure Claude Code.')
+      console.log('Run "im-hub config claude" to configure Claude Code.')
       return
     }
     console.log('🤖 Available Agents:\n')
@@ -312,7 +312,7 @@ program
     const messengers = registry.listMessengers()
     if (messengers.length === 0) {
       console.log('No messengers registered yet.')
-      console.log('Run "bot-hub config wechat" to configure WeChat.')
+      console.log('Run "im-hub config wechat" to configure WeChat.')
       return
     }
     console.log('📱 Available Messengers:\n')

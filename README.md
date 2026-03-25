@@ -1,11 +1,11 @@
-# bot-hub
+# im-hub
 
 **Universal messenger-to-agent bridge** — connect WeChat/Feishu/Telegram to Claude Code/Codex/Copilot/OpenCode.
 
 ```
-npm install -g bot-hub
-bot-hub config wechat   # Scan QR to login
-bot-hub start           # Start the bridge
+npm install -g im-hub
+im-hub config wechat   # Scan QR to login
+im-hub start           # Start the bridge
 ```
 
 ## Features
@@ -19,33 +19,33 @@ bot-hub start           # Start the bridge
 
 ```bash
 # Install globally
-npm install -g bot-hub
+npm install -g im-hub
 ```
 
 ## Quick Start
 
 ```bash
 # 1. Configure WeChat
-bot-hub config wechat
+im-hub config wechat
 # Scan the QR code with WeChat
 
 # 2. Configure Claude Code (optional, auto-detected)
-bot-hub config claude
+im-hub config claude
 
 # 3. Start the bridge
-bot-hub start
+im-hub start
 ```
 
 ## Commands
 
 ```
-bot-hub                 # Same as 'start'
-bot-hub start           # Start the bridge
-bot-hub config wechat   # Configure WeChat
-bot-hub config claude   # Configure Claude Code
-bot-hub agents          # List available agents
-bot-hub messengers      # List available messengers
-bot-hub help
+im-hub                 # Same as 'start'
+im-hub start           # Start the bridge
+im-hub config wechat   # Configure WeChat
+im-hub config claude   # Configure Claude Code
+im-hub agents          # List available agents
+im-hub messengers      # List available messengers
+im-hub help
 ```
 
 ## Chat Commands
@@ -67,7 +67,7 @@ hello                  # Send to default agent
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        bot-hub core                         │
+│                        im-hub core                         │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │ Plugin      │  │ Message     │  │ Session Manager     │  │
 │  │ Registry    │  │ Router      │  │ (per conversation)  │  │
@@ -87,7 +87,7 @@ hello                  # Send to default agent
 ## Project Structure
 
 ```
-bot-hub/
+im-hub/
 ├── src/
 │   ├── core/
 │   │   ├── types.ts              # Plugin interfaces
@@ -111,7 +111,7 @@ bot-hub/
 
 ## Configuration
 
-Config file: `~/.bot-hub/config.json`
+Config file: `~/.im-hub/config.json`
 
 ```json
 {
@@ -130,8 +130,8 @@ Config file: `~/.bot-hub/config.json`
 
 ```bash
 # Clone
-git clone https://github.com/ceociocto/bot-hub
-cd bot-hub
+git clone https://github.com/ceociocto/im-hub
+cd im-hub
 
 # Install deps
 npm install
