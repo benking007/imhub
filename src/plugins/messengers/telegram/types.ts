@@ -2,6 +2,8 @@
 
 export interface TelegramConfig {
   botToken: string
+  /** HTTP proxy URL (e.g., http://127.0.0.1:7890) for regions where Telegram is blocked */
+  proxy?: string
 }
 
 export interface SendMessageResult {

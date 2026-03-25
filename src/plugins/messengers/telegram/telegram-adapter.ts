@@ -39,32 +39,49 @@ export class TelegramAdapter implements MessengerAdapter {
 
     // Set up message handler
     this.bot.on('message:text', async (ctx) => {
+      console.log('[Telegram] Received message:', ctx.message.text)
       // Ignore messages from bots
       if (ctx.message.from.is_bot) {
+        console.log('[Telegram] Ignoring bot message')
         return
       }
 
       if (!this.messageHandler) {
+        console.log('[Telegram] No message handler registered')
         return
       }
 
-      const message: Message = {
-        id: ctx.message.message_id.toString(),
-        threadId: ctx.chat.id.toString(),
-        userId: ctx.message.from?.id?.toString() || 'unknown',
-        text: ctx.message.text || '',
-        timestamp: new Date(ctx.message.date * 1000),
-      }
+      try {
+        const message: Message = {
+          id: ctx.message.message_id.toString(),
+          threadId: ctx.chat.id.toString(),
+          userId: ctx.message.from?.id?.toString() || 'unknown',
+          text: ctx.message.text || '',
+          timestamp: new Date(ctx.message.date * 1000),
+        }
 
-      const msgCtx: MessageContext = {
-        message,
-        platform: 'telegram',
-      }
+        const msgCtx: MessageContext = {
+          message,
+          platform: 'telegram',
+        }
 
-      await this.messageHandler(msgCtx)
+        console.log('[Telegram] Calling message handler for thread:', message.threadId)
+        await this.messageHandler(msgCtx)
+        console.log('[Telegram] Message handler completed')
+      } catch (err) {
+        console.error('[Telegram] Error in message handler:', err)
+      }
     })
 
-    await this.bot.start()
+    // Start bot in background - grammy's start() uses long polling and blocks until stopped
+    console.log('[Telegram] Starting bot with long polling...')
+    this.bot.start().then(() => {
+      console.log('[Telegram] Bot stopped gracefully')
+    }).catch((err) => {
+      if (this.isRunning) {
+        console.error('[Telegram] Bot polling error:', err)
+      }
+    })
     this.isRunning = true
     console.log('🚀 Telegram adapter started')
   }

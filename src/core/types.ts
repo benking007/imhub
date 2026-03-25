@@ -17,7 +17,7 @@ export interface Message {
  */
 export type ParsedMessage =
   | { type: 'default'; prompt: string }
-  | { type: 'command'; command: 'status' | 'help' | 'agents' }
+  | { type: 'command'; command: 'start' | 'status' | 'help' | 'agents' }
   | { type: 'agent'; agent: string; prompt: string }
   | { type: 'error'; prompt: string; error: string }
 

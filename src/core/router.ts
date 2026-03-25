@@ -28,6 +28,7 @@ export function parseMessage(text: string): ParsedMessage {
   const [, cmd, rest] = match
 
   // Built-in commands
+  if (cmd === 'start') return { type: 'command', command: 'start' }
   if (cmd === 'status') return { type: 'command', command: 'status' }
   if (cmd === 'help') return { type: 'command', command: 'help' }
   if (cmd === 'agents') return { type: 'command', command: 'agents' }
@@ -108,19 +109,22 @@ export async function routeMessage(
   }
 }
 
-function handleBuiltInCommand(command: 'status' | 'help' | 'agents'): string {
+function handleBuiltInCommand(command: 'start' | 'status' | 'help' | 'agents'): string {
   switch (command) {
+    case 'start':
+      return `👋 Welcome to IM Hub!\n\nI'm your AI assistant hub. Send me a message and I'll route it to the right AI agent.\n\nUse /help to see available commands.\nUse /agents to list available AI agents.`
+
     case 'status':
       return `📊 IM hub Status\n\nPlatform: Connected\nAgent: Ready\n\nSend a message to start!`
 
     case 'help':
-      return `📖 IM hub Commands\n\n/agents - List available agents\n/status - Show connection status\n/<agent> <prompt> - Switch to agent and send prompt\n\nExample: /claude explain this code`
+      return `📖 IM hub Commands\n\n/agents - List available agents\n/status - Show connection status\n/&lt;agent&gt; &lt;prompt&gt; - Switch to agent and send prompt\n\nExample: /claude explain this code`
 
     case 'agents':
       const agents = registry.listAgents()
       if (agents.length === 0) {
         return '⚠️ No agents registered yet.'
       }
-      return `🤖 Available Agents\n\n${agents.map(a => `• ${a}`).join('\n')}\n\nUse /<agent> to switch.`
+      return `🤖 Available Agents\n\n${agents.map(a => `• ${a}`).join('\n')}\n\nUse /&lt;agent&gt; to switch.`
   }
 }
