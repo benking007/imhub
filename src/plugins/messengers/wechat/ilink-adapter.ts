@@ -308,18 +308,20 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
       this.setContextToken(msg.from_user_id, msg.context_token)
     }
 
-    // Build message object
+    // Build message object - use accountId as channelId
     const message: Message = {
       id: String(msg.message_id || Date.now()),
       threadId: msg.group_id ? `room:${msg.group_id}` : `user:${msg.from_user_id}`,
       userId: msg.from_user_id || 'unknown',
       text,
       timestamp: new Date(msg.create_time_ms || Date.now()),
+      channelId: this.client.getCredentials()?.accountId || 'default',
     }
 
     const ctx: MessageContext = {
       message,
       platform: 'wechat',
+      channelId: this.client.getCredentials()?.accountId || 'default',
     }
 
     console.log('[WeChat] Calling message handler...')

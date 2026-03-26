@@ -4,6 +4,7 @@
 export interface FeishuConfig {
   appId: string
   appSecret: string
+  channelId?: string  // Optional channel ID for multi-channel support
   verificationToken?: string  // Optional, for additional validation
 }
 
@@ -59,29 +60,30 @@ export interface FeishuCardAction {
   value: Record<string, string>
 }
 
+export interface FeishuNoteElement {
+  tag: 'plain_text'
+  content: string
+}
+
 export interface FeishuCardElement {
   tag: 'div' | 'markdown' | 'note' | 'hr' | 'action' | 'code'
   text?: { tag: 'plain_text' | 'lark_md'; content: string }
   content?: string
   language?: string
-  elements?: FeishuCardElement[]
+  elements?: FeishuNoteElement[]
   actions?: FeishuCardAction[]
 }
 
 export interface FeishuCard {
-  type: 'template'
-  data: {
-    template_id?: string
-    config?: {
-      wide_screen_mode?: boolean
-    }
-    header?: {
-      title: { tag: 'plain_text'; content: string }
-      subtitle?: { tag: 'plain_text'; content: string }
-      template?: string
-    }
-    elements: FeishuCardElement[]
+  config?: {
+    wide_screen_mode?: boolean
   }
+  header?: {
+    title: { tag: 'plain_text'; content: string }
+    subtitle?: { tag: 'plain_text'; content: string }
+    template?: string
+  }
+  elements: FeishuCardElement[]
 }
 
 export interface CardCallbackEvent {

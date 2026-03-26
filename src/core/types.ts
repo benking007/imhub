@@ -9,6 +9,7 @@ export interface Message {
   userId: string
   text: string
   timestamp: Date
+  channelId: string
 }
 
 /**
@@ -27,16 +28,18 @@ export type ParsedMessage =
 export interface MessageContext {
   message: Message
   platform: string
+  channelId: string
   agent?: string
   session?: Session
 }
 
 /**
  * Session state for a conversation
- * Keyed by `${platform}:${threadId}` for uniqueness
+ * Keyed by `${platform}:${channelId}:${threadId}` for uniqueness
  */
 export interface Session {
   id: string
+  channelId: string
   threadId: string
   platform: string
   agent: string

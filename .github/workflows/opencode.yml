@@ -1,0 +1,30 @@
+name: opencode
+
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  id-token: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  opencode:
+    if: |
+      (github.event_name == 'issues' && contains(github.event.label.name, 'opencode')) ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'opencode'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run OpenCode
+        uses: anomalyco/opencode/github@latest
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        with:
+          model: opencode/zen

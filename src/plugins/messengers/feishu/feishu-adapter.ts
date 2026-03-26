@@ -159,11 +159,13 @@ export class FeishuAdapter implements MessengerAdapter {
       userId: sender.sender_id?.open_id || sender.sender_id?.user_id || 'unknown',
       text,
       timestamp: new Date(parseInt(message.create_time || '0')),
+      channelId: this.config?.channelId || 'default',
     }
 
     const ctx: MessageContext = {
       message: msg,
-      platform: 'feishu'
+      platform: 'feishu',
+      channelId: this.config?.channelId || 'default',
     }
 
     try {

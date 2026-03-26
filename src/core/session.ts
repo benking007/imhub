@@ -31,14 +31,15 @@ class SessionManager {
 
   /**
    * Get or create a session for a conversation
-   * Session key: `${platform}:${threadId}`
+   * Session key: `${platform}:${channelId}:${threadId}`
    */
   async getOrCreateSession(
     platform: string,
+    channelId: string,
     threadId: string,
     agent: string
   ): Promise<Session> {
-    const key = `${platform}:${threadId}`
+    const key = `${platform}:${channelId}:${threadId}`
     const now = new Date()
 
     // Check memory cache
@@ -70,7 +71,8 @@ class SessionManager {
 
     // Create new session
     session = {
-      id: `${platform}-${threadId}-${Date.now()}`,
+      id: `${platform}-${channelId}-${threadId}-${Date.now()}`,
+      channelId,
       threadId,
       platform,
       agent,
@@ -89,8 +91,8 @@ class SessionManager {
    * Get existing session without creating a new one
    * Returns undefined if no session exists or it's expired
    */
-  async getExistingSession(platform: string, threadId: string): Promise<Session | undefined> {
-    const key = `${platform}:${threadId}`
+  async getExistingSession(platform: string, channelId: string, threadId: string): Promise<Session | undefined> {
+    const key = `${platform}:${channelId}:${threadId}`
     const now = new Date()
 
     // Check memory cache
@@ -122,17 +124,19 @@ class SessionManager {
    */
   async switchAgent(
     platform: string,
+    channelId: string,
     threadId: string,
     newAgent: string
   ): Promise<Session> {
-    const key = `${platform}:${threadId}`
+    const key = `${platform}:${channelId}:${threadId}`
 
     // Get existing session or create new
     const existing = this.sessions.get(key) || await this.loadSession(key)
 
     const now = new Date()
     const session: Session = {
-      id: `${platform}-${threadId}-${Date.now()}`,
+      id: `${platform}-${channelId}-${threadId}-${Date.now()}`,
+      channelId,
       threadId,
       platform,
       agent: newAgent,

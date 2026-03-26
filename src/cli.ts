@@ -18,10 +18,11 @@ interface Config {
   messengers: string[]
   agents: string[]
   defaultAgent: string
-  telegram?: { botToken: string }
+  telegram?: { botToken: string; channelId?: string }
   feishu?: {
     appId: string
     appSecret: string
+    channelId?: string
   }
   [key: string]: unknown
 }
@@ -153,6 +154,7 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     // Route to appropriate handler
     const result = await routeMessage(parsed, {
       threadId: message.threadId,
+      channelId: ctx.channelId,
       platform,
       defaultAgent,
     })
@@ -188,15 +190,11 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
       if (fullResponse) {
         console.log(`[handleMessage] Full response length:`, fullResponse.length)
 
-        // For Feishu, use cards with action buttons
+        // For Feishu, use cards for better formatting
         if (platform === 'feishu' && messenger.sendCard) {
           const { CardBuilder } = await import('./plugins/messengers/feishu/card-builder.js')
           const card = new CardBuilder()
             .addMarkdown(fullResponse)
-            .addButtons([
-              { text: 'Continue', type: 'primary', value: { action: 'continue', threadId: message.threadId } },
-              { text: 'Stop', type: 'danger', value: { action: 'stop', threadId: message.threadId } }
-            ])
             .addAgentBadge(ctx.session?.agent || defaultAgent)
             .build()
           await messenger.sendCard(message.threadId, card)
@@ -336,12 +334,19 @@ program
           return
         }
 
-        config.telegram = { botToken: token }
+        const channelId = await new Promise<string>((resolve) => {
+          rl.question('Enter channel ID (optional, press Enter for default): ', (answer) => {
+            resolve(answer.trim() || 'default')
+          })
+        })
+
+        config.telegram = { botToken: token, channelId }
         if (!config.messengers.includes('telegram')) {
           config.messengers.push('telegram')
         }
 
         console.log('✅ Telegram bot token saved')
+        console.log(`   Channel ID: ${channelId}`)
         break
 
       case 'feishu':

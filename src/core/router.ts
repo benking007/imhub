@@ -49,7 +49,7 @@ export function parseMessage(text: string): ParsedMessage {
  */
 export async function routeMessage(
   parsed: ParsedMessage,
-  ctx: { threadId: string; platform: string; defaultAgent: string }
+  ctx: { channelId: string; threadId: string; platform: string; defaultAgent: string }
 ): Promise<string | AsyncGenerator<string>> {
   switch (parsed.type) {
     case 'command': {
@@ -63,7 +63,7 @@ export async function routeMessage(
       }
 
       // Always switch the session agent (even without prompt)
-      await sessionManager.switchAgent(ctx.platform, ctx.threadId, agent.name)
+      await sessionManager.switchAgent(ctx.platform, ctx.channelId, ctx.threadId, agent.name)
 
       // If no prompt, just confirm switch
       if (!parsed.prompt) {
@@ -73,6 +73,7 @@ export async function routeMessage(
       // Get session and call agent
       const session = await sessionManager.getOrCreateSession(
         ctx.platform,
+        ctx.channelId,
         ctx.threadId,
         agent.name
       )
@@ -85,7 +86,7 @@ export async function routeMessage(
 
     case 'default': {
       // Try to get existing session to use its agent, otherwise fall back to default
-      const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.threadId)
+      const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
       const agentName = existingSession?.agent || ctx.defaultAgent
 
       const agent = registry.findAgent(agentName)
@@ -101,6 +102,7 @@ export async function routeMessage(
       // Get or create session, then call agent
       const session = await sessionManager.getOrCreateSession(
         ctx.platform,
+        ctx.channelId,
         ctx.threadId,
         agentName
       )

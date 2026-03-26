@@ -21,6 +21,7 @@ const CHANNEL_VERSION = '1.0.0'
 export class ILinkClient {
   private baseUrl: string
   private botToken: string | null = null
+  private channelId: string = 'default'
 
   constructor(baseUrl: string = DEFAULT_BASE_URL) {
     this.baseUrl = baseUrl
@@ -29,6 +30,20 @@ export class ILinkClient {
   // ============================================
   // Authentication
   // ============================================
+
+  /**
+   * Get channel ID
+   */
+  getChannelId(): string {
+    return this.channelId
+  }
+
+  /**
+   * Set channel ID
+   */
+  setChannelId(channelId: string): void {
+    this.channelId = channelId
+  }
 
   /**
    * Get QR code for login
@@ -66,6 +81,9 @@ export class ILinkClient {
     if (credentials.baseUrl) {
       this.baseUrl = credentials.baseUrl
     }
+    if (credentials.channelId) {
+      this.channelId = credentials.channelId
+    }
   }
 
   /**
@@ -80,6 +98,21 @@ export class ILinkClient {
    */
   hasCredentials(): boolean {
     return this.botToken !== null
+  }
+
+  /**
+   * Get credentials (for channel ID access)
+   */
+  getCredentials(): Credentials | null {
+    if (!this.botToken) return null
+    return {
+      bot_token: this.botToken,
+      baseUrl: this.baseUrl,
+      accountId: '',
+      userId: '',
+      channelId: this.channelId,
+      savedAt: '',
+    }
   }
 
   // ============================================

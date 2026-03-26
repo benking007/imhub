@@ -25,6 +25,7 @@ export interface Credentials {
   baseUrl: string
   accountId: string // ilink_bot_id
   userId: string // ilink_user_id
+  channelId?: string // Optional channel ID for multi-channel support
   savedAt: string
 }
 

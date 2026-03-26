@@ -2,6 +2,7 @@
 
 export interface TelegramConfig {
   botToken: string
+  channelId?: string  // Optional channel ID for multi-channel support
   /** HTTP proxy URL (e.g., http://127.0.0.1:7890) for regions where Telegram is blocked */
   proxy?: string
 }

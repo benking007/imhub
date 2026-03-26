@@ -58,11 +58,13 @@ export class TelegramAdapter implements MessengerAdapter {
           userId: ctx.message.from?.id?.toString() || 'unknown',
           text: ctx.message.text || '',
           timestamp: new Date(ctx.message.date * 1000),
+          channelId: this.config?.channelId || 'default',
         }
 
         const msgCtx: MessageContext = {
           message,
           platform: 'telegram',
+          channelId: this.config?.channelId || 'default',
         }
 
         console.log('[Telegram] Calling message handler for thread:', message.threadId)

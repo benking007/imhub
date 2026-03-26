@@ -4,7 +4,7 @@
 import type { FeishuCard, FeishuCardElement, FeishuCardAction } from './types.js'
 
 export class CardBuilder {
-  private header: FeishuCard['data']['header']
+  private header: FeishuCard['header']
   private elements: FeishuCardElement[] = []
 
   withHeader(title: string, template?: string): this {
@@ -76,22 +76,22 @@ export class CardBuilder {
     this.elements.push({
       tag: 'note',
       elements: [{
-        tag: 'markdown',
-        content: `${emoji} *${agent}*`
+        tag: 'plain_text',
+        content: `${emoji} ${agent}`
       }]
     })
     return this
   }
 
   build(): FeishuCard {
-    return {
-      type: 'template',
-      data: {
-        config: { wide_screen_mode: true },
-        header: this.header,
-        elements: this.elements
-      }
+    const card: FeishuCard = {
+      config: { wide_screen_mode: true },
+      elements: this.elements
     }
+    if (this.header) {
+      card.header = this.header
+    }
+    return card
   }
 }
 
