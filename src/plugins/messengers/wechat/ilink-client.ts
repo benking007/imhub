@@ -21,6 +21,8 @@ const CHANNEL_VERSION = '1.0.0'
 export class ILinkClient {
   private baseUrl: string
   private botToken: string | null = null
+  private accountId: string = ''
+  private userId: string = ''
   private channelId: string = 'default'
 
   constructor(baseUrl: string = DEFAULT_BASE_URL) {
@@ -81,6 +83,12 @@ export class ILinkClient {
     if (credentials.baseUrl) {
       this.baseUrl = credentials.baseUrl
     }
+    if (credentials.accountId) {
+      this.accountId = credentials.accountId
+    }
+    if (credentials.userId) {
+      this.userId = credentials.userId
+    }
     if (credentials.channelId) {
       this.channelId = credentials.channelId
     }
@@ -91,6 +99,8 @@ export class ILinkClient {
    */
   clearCredentials(): void {
     this.botToken = null
+    this.accountId = ''
+    this.userId = ''
   }
 
   /**
@@ -108,8 +118,8 @@ export class ILinkClient {
     return {
       bot_token: this.botToken,
       baseUrl: this.baseUrl,
-      accountId: '',
-      userId: '',
+      accountId: this.accountId,
+      userId: this.userId,
       channelId: this.channelId,
       savedAt: '',
     }

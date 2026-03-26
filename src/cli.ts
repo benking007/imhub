@@ -118,10 +118,13 @@ program
  * Handle incoming message from any messenger
  */
 async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise<void> {
-  const { message, platform } = ctx
+  const { message, platform, channelId } = ctx
   console.log(`[handleMessage] Received: "${message.text}" from ${message.threadId}`)
+  console.log(`[handleMessage] platform=${platform}, channelId=${channelId}`)
 
-  const messenger = registry.getMessenger(platform === 'wechat' ? 'wechat-ilink' : platform)
+  const messengerName = platform === 'wechat' ? 'wechat-ilink' : platform
+  console.log(`[handleMessage] Getting messenger: ${messengerName}`)
+  const messenger = registry.getMessenger(messengerName)
 
   if (!messenger) {
     console.error(`No messenger found for platform: ${platform}`)
