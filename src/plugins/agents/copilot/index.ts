@@ -9,7 +9,7 @@
 import { access, constants, readdir } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { AgentAdapter } from '../../../core/types.js'
+import type { AgentAdapter, ChatMessage } from '../../../core/types.js'
 import { crossSpawn, isWindows, isMac } from '../../../utils/cross-platform.js'
 
 // Installation method detection result
@@ -149,8 +149,8 @@ export class CopilotAdapter implements AgentAdapter {
     return install !== null
   }
 
-  async *sendPrompt(_sessionId: string, prompt: string): AsyncGenerator<string> {
-    console.log(`[Copilot] sendPrompt called, prompt: ${prompt}`)
+  async *sendPrompt(_sessionId: string, prompt: string, history?: ChatMessage[]): AsyncGenerator<string> {
+    console.log(`[Copilot] sendPrompt called, prompt: ${prompt}, history: ${history?.length || 0} messages`)
 
     const install = await detectCopilotInstall()
     if (!install) {
@@ -166,13 +166,34 @@ export class CopilotAdapter implements AgentAdapter {
       return
     }
 
+    // Build prompt with conversation context
+    const contextualPrompt = this.buildContextualPrompt(prompt, history)
+
     console.log(`[Copilot] Using installation: ${install.type} (${install.command})`)
-    const response = await this.callCopilot(prompt, install)
+    const response = await this.callCopilot(contextualPrompt, install)
     console.log(`[Copilot] Response length: ${response.length}`)
 
     if (response) {
       yield response
     }
+  }
+
+  /**
+   * Build prompt with conversation history context
+   */
+  private buildContextualPrompt(prompt: string, history?: ChatMessage[]): string {
+    if (!history || history.length === 0) {
+      return prompt
+    }
+
+    const historyText = history
+      .map(msg => `[${msg.role === 'user' ? 'User' : 'Assistant'}]: ${msg.content}`)
+      .join('\n\n')
+
+    return `Previous conversation context:
+${historyText}
+
+Current request: ${prompt}`
   }
 
   private callCopilot(prompt: string, install: CopilotInstall): Promise<string> {

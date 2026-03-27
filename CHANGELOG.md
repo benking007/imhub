@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.7] - 2026-03-27
+
+### Added
+- **Conversation history support** — agents now remember context across messages
+  - Session stores message history (`ChatMessage[]`)
+  - History is passed to agents with each prompt for context awareness
+  - `/new` command to start a fresh conversation (clears history)
+- **ChatMessage type** — `{ role: 'user' | 'assistant', content: string, timestamp: Date }`
+- **Session history management** in SessionManager:
+  - `addMessage()` — add message to conversation history
+  - `resetConversation()` — clear history, start new session
+  - `getSessionWithHistory()` — retrieve session with messages
+
+### Changed
+- **AgentAdapter interface** — `sendPrompt()` now accepts optional `history?: ChatMessage[]`
+- **All agent adapters** (claude-code, codex, copilot, opencode) now:
+  - Accept conversation history
+  - Build contextual prompts with previous messages
+- **Router** — automatically saves user messages and agent responses to history
+- **Help text** — updated to include `/new` command
+
+### Fixed
+- Context loss issue in channel-based conversations — agents now maintain conversation memory
+
 ## [0.2.2.0] - 2026-03-27
 
 ### Added

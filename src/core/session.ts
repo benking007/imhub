@@ -3,7 +3,7 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
-import type { Session } from './types.js'
+import type { Session, ChatMessage } from './types.js'
 
 const SESSIONS_DIR = join(homedir(), '.im-hub', 'sessions')
 const DEFAULT_TTL = 30 * 60 * 1000 // 30 minutes
@@ -79,6 +79,7 @@ class SessionManager {
       createdAt: now,
       lastActivity: now,
       ttl: DEFAULT_TTL,
+      messages: [],
     }
 
     this.sessions.set(key, session)
@@ -143,12 +144,71 @@ class SessionManager {
       createdAt: existing?.createdAt || now,
       lastActivity: now,
       ttl: DEFAULT_TTL,
+      messages: existing?.messages || [],
     }
 
     this.sessions.set(key, session)
     await this.saveSession(key, session)
 
     return session
+  }
+
+  /**
+   * Add a message to the session history
+   */
+  async addMessage(
+    platform: string,
+    channelId: string,
+    threadId: string,
+    message: ChatMessage
+  ): Promise<void> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+
+    if (session) {
+      session.messages.push(message)
+      session.lastActivity = new Date()
+      this.sessions.set(key, session)
+      await this.saveSession(key, session)
+    }
+  }
+
+  /**
+   * Reset conversation history (keep session but clear messages)
+   */
+  async resetConversation(
+    platform: string,
+    channelId: string,
+    threadId: string
+  ): Promise<Session | undefined> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+
+    if (session) {
+      session.messages = []
+      session.lastActivity = new Date()
+      session.id = `${platform}-${channelId}-${threadId}-${Date.now()}` // New session ID
+      this.sessions.set(key, session)
+      await this.saveSession(key, session)
+      return session
+    }
+
+    return undefined
+  }
+
+  /**
+   * Get session with messages (convenience method)
+   */
+  async getSessionWithHistory(
+    platform: string,
+    channelId: string,
+    threadId: string
+  ): Promise<{ session: Session; messages: ChatMessage[] } | undefined> {
+    const session = await this.getExistingSession(platform, channelId, threadId)
+    if (session) {
+      return { session, messages: session.messages }
+    }
+    return undefined
   }
 
   private async saveSession(key: string, session: Session): Promise<void> {
@@ -168,6 +228,15 @@ class SessionManager {
       // Convert date strings back to Date objects
       session.createdAt = new Date(session.createdAt)
       session.lastActivity = new Date(session.lastActivity)
+      // Convert message timestamps
+      if (session.messages) {
+        session.messages = session.messages.map(msg => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp)
+        }))
+      } else {
+        session.messages = []
+      }
       return session
     } catch {
       return undefined

@@ -98,10 +98,11 @@ im-hub help
 Send these as messages to the bot:
 
 ```
-hello                  # Send to default agent
+hello                  # Send to default agent (context preserved)
 /status                # Show connection status
 /help                  # Show available commands
 /agents                # List available agents
+/new                   # Start a new conversation (clear context)
 /cc explain this code  # Switch to Claude Code
 /cx explain this code  # Switch to Codex
 /co explain this code  # Switch to Copilot
@@ -204,7 +205,7 @@ npm start
 ### v0.2.0
 - [x] Feishu adapter
 - [x] Telegram adapter
-- [ ] Session persistence
+- [x] Session persistence with conversation history
 
 ### v0.3.0
 - [ ] DingTalk adapter

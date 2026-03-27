@@ -1,7 +1,7 @@
 // Claude Code agent adapter
 // Uses --print --output-format stream-json for programmatic interaction
 
-import type { AgentAdapter } from '../../../core/types.js'
+import type { AgentAdapter, ChatMessage } from '../../../core/types.js'
 import { crossSpawn } from '../../../utils/cross-platform.js'
 
 interface ClaudeMessage {
@@ -28,16 +28,37 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     })
   }
 
-  async *sendPrompt(_sessionId: string, prompt: string): AsyncGenerator<string> {
-    console.log(`[ClaudeCode] sendPrompt called, prompt: ${prompt}`)
+  async *sendPrompt(_sessionId: string, prompt: string, history?: ChatMessage[]): AsyncGenerator<string> {
+    console.log(`[ClaudeCode] sendPrompt called, prompt: ${prompt}, history: ${history?.length || 0} messages`)
+
+    // Build prompt with conversation context
+    const contextualPrompt = this.buildContextualPrompt(prompt, history)
 
     // Use a promise to wait for the full response
-    const response = await this.callClaude(prompt)
+    const response = await this.callClaude(contextualPrompt)
     console.log(`[ClaudeCode] Response length: ${response.length}`)
 
     if (response) {
       yield response
     }
+  }
+
+  /**
+   * Build prompt with conversation history context
+   */
+  private buildContextualPrompt(prompt: string, history?: ChatMessage[]): string {
+    if (!history || history.length === 0) {
+      return prompt
+    }
+
+    const historyText = history
+      .map(msg => `[${msg.role === 'user' ? 'User' : 'Assistant'}]: ${msg.content}`)
+      .join('\n\n')
+
+    return `Previous conversation context:
+${historyText}
+
+Current request: ${prompt}`
   }
 
   private callClaude(prompt: string): Promise<string> {

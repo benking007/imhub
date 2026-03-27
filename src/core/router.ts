@@ -1,6 +1,6 @@
 // Message router — parses commands and routes to agents
 
-import type { ParsedMessage, MessageContext } from './types.js'
+import type { ParsedMessage, MessageContext, ChatMessage } from './types.js'
 import { registry } from './registry.js'
 import { sessionManager } from './session.js'
 import { isAgentAvailableCached, formatAgentNotAvailableError } from './onboarding.js'
@@ -33,6 +33,7 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'status') return { type: 'command', command: 'status' }
   if (cmd === 'help') return { type: 'command', command: 'help' }
   if (cmd === 'agents') return { type: 'command', command: 'agents' }
+  if (cmd === 'new') return { type: 'command', command: 'new' }
 
   // Check if it's an agent alias
   const agent = registry.findAgent(cmd)
@@ -54,7 +55,7 @@ export async function routeMessage(
 ): Promise<string | AsyncGenerator<string>> {
   switch (parsed.type) {
     case 'command': {
-      return handleBuiltInCommand(parsed.command)
+      return handleBuiltInCommand(parsed.command, ctx)
     }
 
     case 'agent': {
@@ -76,14 +77,14 @@ export async function routeMessage(
         return `✅ Switched to ${agent.name}`
       }
 
-      // Get session and call agent
+      // Get session and call agent with history
       const session = await sessionManager.getOrCreateSession(
         ctx.platform,
         ctx.channelId,
         ctx.threadId,
         agent.name
       )
-      return agent.sendPrompt(session.id, parsed.prompt)
+      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx)
     }
 
     case 'error': {
@@ -110,19 +111,64 @@ export async function routeMessage(
         return '💬 Send a message to chat with the agent.'
       }
 
-      // Get or create session, then call agent
+      // Get or create session, then call agent with history
       const session = await sessionManager.getOrCreateSession(
         ctx.platform,
         ctx.channelId,
         ctx.threadId,
         agentName
       )
-      return agent.sendPrompt(session.id, parsed.prompt)
+      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx)
     }
   }
 }
 
-function handleBuiltInCommand(command: 'start' | 'status' | 'help' | 'agents'): string {
+/**
+ * Call agent with conversation history and save messages
+ */
+async function callAgentWithHistory(
+  agent: ReturnType<typeof registry.findAgent>,
+  sessionId: string,
+  prompt: string,
+  history: ChatMessage[],
+  ctx: { channelId: string; threadId: string; platform: string }
+): Promise<string | AsyncGenerator<string>> {
+  // Save user message
+  await sessionManager.addMessage(ctx.platform, ctx.channelId, ctx.threadId, {
+    role: 'user',
+    content: prompt,
+    timestamp: new Date()
+  })
+
+  // Call agent with history
+  const generator = agent!.sendPrompt(sessionId, prompt, history)
+
+  // For streaming responses, we need to collect the full response to save it
+  // Return a wrapper generator that saves the response when complete
+  return (async function* (): AsyncGenerator<string> {
+    let fullResponse = ''
+    try {
+      for await (const chunk of generator) {
+        fullResponse += chunk
+        yield chunk
+      }
+    } finally {
+      // Save assistant response (only if we got some content)
+      if (fullResponse.trim()) {
+        await sessionManager.addMessage(ctx.platform, ctx.channelId, ctx.threadId, {
+          role: 'assistant',
+          content: fullResponse,
+          timestamp: new Date()
+        })
+      }
+    }
+  })()
+}
+
+async function handleBuiltInCommand(
+  command: 'start' | 'status' | 'help' | 'agents' | 'new',
+  ctx: { channelId: string; threadId: string; platform: string }
+): Promise<string> {
   switch (command) {
     case 'start':
       return `👋 Welcome to IM Hub!\n\nI'm your AI assistant hub. Send me a message and I'll route it to the right AI agent.\n\nUse /help to see available commands.\nUse /agents to list available AI agents.`
@@ -131,7 +177,7 @@ function handleBuiltInCommand(command: 'start' | 'status' | 'help' | 'agents'): 
       return `📊 IM hub Status\n\nPlatform: Connected\nAgent: Ready\n\nSend a message to start!`
 
     case 'help':
-      return `📖 IM hub Commands\n\n/agents - List available agents\n/status - Show connection status\n/&lt;agent&gt; &lt;prompt&gt; - Switch to agent and send prompt\n\nExample: /claude explain this code`
+      return `📖 IM hub Commands\n\n/agents - List available agents\n/new - Start a new conversation (clear history)\n/status - Show connection status\n/&lt;agent&gt; &lt;prompt&gt; - Switch to agent and send prompt\n\nExample: /claude explain this code`
 
     case 'agents':
       const agents = registry.listAgents()
@@ -139,5 +185,12 @@ function handleBuiltInCommand(command: 'start' | 'status' | 'help' | 'agents'): 
         return '⚠️ No agents registered yet.'
       }
       return `🤖 Available Agents\n\n${agents.map(a => `• ${a}`).join('\n')}\n\nUse /&lt;agent&gt; to switch.`
+
+    case 'new':
+      const session = await sessionManager.resetConversation(ctx.platform, ctx.channelId, ctx.threadId)
+      if (session) {
+        return `🆕 New conversation started with ${session.agent}.\n\nPrevious context has been cleared.`
+      }
+      return `🆕 Ready to start a new conversation.\n\nSend a message to begin.`
   }
 }

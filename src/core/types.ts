@@ -13,12 +13,21 @@ export interface Message {
 }
 
 /**
+ * Chat message for conversation history
+ */
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: Date
+}
+
+/**
  * Discriminated union for parsed messages
  * Each variant has a unique `type` field for type-safe pattern matching
  */
 export type ParsedMessage =
   | { type: 'default'; prompt: string }
-  | { type: 'command'; command: 'start' | 'status' | 'help' | 'agents' }
+  | { type: 'command'; command: 'start' | 'status' | 'help' | 'agents' | 'new' }
   | { type: 'agent'; agent: string; prompt: string }
   | { type: 'error'; prompt: string; error: string }
 
@@ -46,6 +55,8 @@ export interface Session {
   createdAt: Date
   lastActivity: Date
   ttl: number
+  /** Conversation history for context preservation */
+  messages: ChatMessage[]
 }
 
 /**
@@ -81,7 +92,7 @@ export interface MessengerAdapter {
 export interface AgentAdapter {
   readonly name: string
   readonly aliases: string[]
-  sendPrompt(sessionId: string, prompt: string): AsyncGenerator<string>
+  sendPrompt(sessionId: string, prompt: string, history?: ChatMessage[]): AsyncGenerator<string>
   isAvailable(): Promise<boolean>
 }
 
