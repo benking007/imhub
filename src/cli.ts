@@ -607,6 +607,11 @@ program
   .command('agents')
   .description('List available agents')
   .action(async () => {
+    await registry.loadBuiltInPlugins()
+    const config = await loadConfig()
+    if (config.acpAgents?.length) {
+      await registry.loadACPAgents(config.acpAgents)
+    }
     const agents = registry.listAgents()
     if (agents.length === 0) {
       console.log('No agents registered yet.')
@@ -651,7 +656,8 @@ program
 program
   .command('messengers')
   .description('List available messengers')
-  .action(() => {
+  .action(async () => {
+    await registry.loadBuiltInPlugins()
     const messengers = registry.listMessengers()
     if (messengers.length === 0) {
       console.log('No messengers registered yet.')
