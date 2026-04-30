@@ -1,7 +1,8 @@
-// /job commands — create and manage persisted async jobs
+// /job (also /task) commands — create and manage persisted async jobs with subtask sessions
 
 import type { RouteContext } from '../router.js'
 import { registry } from '../registry.js'
+import { sessionManager } from '../session.js'
 import { createJob, getJob, listJobs, cancelJob, runJob, getJobStats, type Job } from '../job-board.js'
 
 function formatJob(j: Job): string {
@@ -14,7 +15,7 @@ function formatJob(j: Job): string {
 export async function handleJobCommand(
   args: string,
   ctx: RouteContext
-): Promise<string> {
+): Promise<string | AsyncGenerator<string>> {
   const parts = args.trim().split(/\s+/).filter(Boolean)
   const sub = parts[0] || 'list'
   const rest = parts.slice(1).join(' ')
@@ -109,7 +110,51 @@ Agent: ${job.agent}
       return `❌ 无法取消任务 #${id}。可能不存在或已结束。`
     }
 
+    case 'switch':
+    case 'sw': {
+      const arg = parts[1]
+      if (!arg) return '用法: /job switch <id>  或  /job switch main'
+      if (arg === 'main' || arg === '0') {
+        await sessionManager.setActiveSubtask(ctx.platform, ctx.channelId, ctx.threadId, null)
+        return '✅ 已返回主会话。'
+      }
+      const id = parseInt(arg, 10)
+      if (isNaN(id)) return '用法: /job switch <id>  或  /job switch main'
+      const job = getJob(id)
+      if (!job) return `❌ 未找到任务 #${id}。`
+      await sessionManager.setActiveSubtask(ctx.platform, ctx.channelId, ctx.threadId, id)
+      // Also create/update subtask metadata in session
+      await sessionManager.updateSubtask(ctx.platform, ctx.channelId, ctx.threadId, id, {
+        id, agent: job.agent, prompt: job.prompt,
+        status: 'running', createdAt: new Date(),
+      })
+      return `✅ 已进入任务 #${id} 的会话 (${job.agent})。\n\n直接发送消息继续对话。\n/job switch main 返回主会话。`
+    }
+
+    case 'collect':
+    case 'cl': {
+      const id = parseInt(parts[1] || '', 10)
+      if (isNaN(id)) return '用法: /job collect <id>'
+      const job = getJob(id)
+      if (!job) return `❌ 未找到任务 #${id}。`
+      if (!job.result) return `⚠️ 任务 #${id} (${job.status}) 暂无结果。`
+
+      // Summarize via main agent
+      const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
+      const mainAgent = existingSession?.agent || ctx.defaultAgent
+      const agent = registry.findAgent(mainAgent)
+      if (!agent) return `❌ Agent "${mainAgent}" not found.`
+
+      const summaryPrompt = `Review and summarize this task result from ${job.agent}:\n\n---\n${job.result}\n---\n\nProvide a concise summary.`
+      ctx.logger.info({ event: 'task.collect', taskId: id, agent: mainAgent })
+      // Return the generator — caller will stream
+      const generator = agent.sendPrompt(`collect-${id}`, summaryPrompt, [])
+      return (async function* () {
+        for await (const chunk of generator) yield chunk
+      })()
+    }
+
     default:
-      return '用法: /job [list|create|check|run|cancel]'
+      return '用法: /job [list|create|check|run|cancel|switch|collect]\n\n也支持 /task 作为 /job 的别名。'
   }
 }

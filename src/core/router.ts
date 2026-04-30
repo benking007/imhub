@@ -15,6 +15,7 @@ import { circuitBreaker } from './circuit-breaker.js'
 import { classifyIntent } from './intent.js'
 import { userLimiter } from './rate-limiter.js'
 import { workspaceRegistry } from './workspace.js'
+import { getJob } from './job-board.js'
 
 /** Route context passed through the routing pipeline */
 export interface RouteContext {
@@ -61,7 +62,12 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'new') return { type: 'command', command: 'new' }
   if (cmd === 'audit') return { type: 'audit', args: rest }
   if (cmd === 'router') return { type: 'router', args: rest }
-  if (cmd === 'job') return { type: 'job', args: rest }
+  if (cmd === 'job' || cmd === 'task') return { type: 'job', args: rest }
+  if (cmd === 'tasks') return { type: 'job', args: 'list' }
+  if (cmd === 'check') return { type: 'job', args: `check ${rest}` }
+  if (cmd === 'cancel') return { type: 'job', args: `cancel ${rest}` }
+  if (cmd === 'switch') return { type: 'job', args: `switch ${rest}` }
+  if (cmd === 'collect') return { type: 'job', args: `collect ${rest}` }
 
   // Check if it's an agent alias (registered agents take priority over generic commands)
   const agent = registry.findAgent(cmd)
@@ -145,6 +151,30 @@ export async function routeMessage(
       }
 
       const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
+
+      // If active subtask, route message to subtask's independent session
+      if (existingSession?.activeSubtaskId) {
+        const tid = existingSession.activeSubtaskId
+        const job = getJob(tid)
+        if (!job) {
+          return `❌ 任务 #${tid} 已不存在。使用 /job switch main 返回主会话。`
+        }
+        const tAgent = registry.findAgent(job.agent)
+        if (!tAgent) {
+          return `❌ 任务 #${tid} 的 Agent "${job.agent}" 不可用。`
+        }
+        const subSession = await sessionManager.getOrCreateSubSession(
+          ctx.platform, ctx.channelId, ctx.threadId, tid, job.agent
+        )
+        if (!parsed.prompt) {
+          return `💬 继续对话（任务 #${tid}, ${job.agent}）`
+        }
+        // Use sub-session for this turn
+        await sessionManager.addMessage(ctx.platform, ctx.channelId, `${ctx.threadId}:sub:${tid}`, {
+          role: 'user', content: parsed.prompt, timestamp: new Date()
+        })
+        return callAgentWithHistory(tAgent, subSession.id, parsed.prompt, subSession.messages, ctx)
+      }
 
       // Use intent classifier to pick best agent
       const stickyAgent = existingSession?.agent

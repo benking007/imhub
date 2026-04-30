@@ -4,7 +4,7 @@ import { createHash } from 'crypto'
 import { homedir } from 'os'
 import { join } from 'path'
 import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
-import type { Session, ChatMessage } from './types.js'
+import type { Session, ChatMessage, SubtaskMeta } from './types.js'
 
 const SESSIONS_DIR = join(homedir(), '.im-hub', 'sessions')
 
@@ -221,6 +221,85 @@ class SessionManager {
       return { session, messages: session.messages }
     }
     return undefined
+  }
+
+  /**
+   * Create or get a subtask session (independent from parent).
+   */
+  async getOrCreateSubSession(
+    platform: string, channelId: string, threadId: string,
+    subtaskId: number, agent: string
+  ): Promise<Session> {
+    const key = `${platform}:${channelId}:${threadId}:sub:${subtaskId}`
+    const now = new Date()
+    let session = this.sessions.get(key) || await this.loadSession(key)
+    if (session) {
+      session.lastActivity = now
+      return session
+    }
+    session = {
+      id: `sub-${platform}-${channelId}-${threadId}-${subtaskId}`,
+      channelId, threadId, platform, agent,
+      createdAt: now, lastActivity: now, ttl: DEFAULT_TTL, messages: [],
+    }
+    this.sessions.set(key, session)
+    await this.saveSession(key, session)
+    return session
+  }
+
+  /**
+   * Set active subtask id on parent session — subsequent messages route to the subtask.
+   */
+  async setActiveSubtask(
+    platform: string, channelId: string, threadId: string, taskId: number | null
+  ): Promise<void> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session) return
+    session.activeSubtaskId = taskId
+    this.sessions.set(key, session)
+    await this.saveSession(key, session)
+  }
+
+  /**
+   * Get subtask metadata list from parent session.
+   */
+  async getSubtasks(platform: string, channelId: string, threadId: string): Promise<SubtaskMeta[]> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    return session?.subtasks || []
+  }
+
+  /**
+   * Update subtask metadata in parent session.
+   */
+  async updateSubtask(
+    platform: string, channelId: string, threadId: string,
+    taskId: number, patch: Partial<SubtaskMeta>
+  ): Promise<void> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session) return
+    if (!session.subtasks) { session.subtasks = [] }
+    const idx = session.subtasks.findIndex(s => s.id === taskId)
+    if (idx >= 0) {
+      session.subtasks[idx] = { ...session.subtasks[idx], ...patch }
+    } else {
+      session.subtasks.push({ id: taskId, ...patch } as SubtaskMeta)
+    }
+    this.sessions.set(key, session)
+    await this.saveSession(key, session)
+  }
+
+  /** Get subtask counter and increment. */
+  async nextSubtaskId(platform: string, channelId: string, threadId: string): Promise<number> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session) return 1
+    session.subtaskCounter = (session.subtaskCounter || 0) + 1
+    this.sessions.set(key, session)
+    await this.saveSession(key, session)
+    return session.subtaskCounter
   }
 
   private async saveSession(key: string, session: Session): Promise<void> {

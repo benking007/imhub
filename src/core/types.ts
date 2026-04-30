@@ -65,8 +65,23 @@ export interface Session {
   createdAt: Date
   lastActivity: Date
   ttl: number
-  /** Conversation history for context preservation */
   messages: ChatMessage[]
+  /** Active subtask id for /switch routing */
+  activeSubtaskId?: number | null
+  /** Subtask metadata array */
+  subtasks?: SubtaskMeta[]
+  subtaskCounter?: number
+}
+
+/** Lightweight subtask metadata stored in parent session */
+export interface SubtaskMeta {
+  id: number
+  agent: string
+  prompt: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  result?: string
+  createdAt: Date
+  completedAt?: Date
 }
 
 /**
