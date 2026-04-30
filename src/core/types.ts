@@ -1,5 +1,7 @@
 // im-hub core types
 
+import type { Logger } from 'pino'
+
 /**
  * Message received from a messenger platform
  */
@@ -41,6 +43,10 @@ export interface MessageContext {
   channelId: string
   agent?: string
   session?: Session
+  /** Unique trace id generated at message ingestion */
+  traceId?: string
+  /** Child logger bound to this request's traceId */
+  logger?: Logger
 }
 
 /**

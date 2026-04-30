@@ -7,9 +7,10 @@ import { join } from 'path'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { registry } from './core/registry.js'
 import { sessionManager } from './core/session.js'
-import { parseMessage, routeMessage } from './core/router.js'
+import { parseMessage, routeMessage, type RouteContext } from './core/router.js'
 import { crossSpawn, isMac, isWindows } from './utils/cross-platform.js'
 import type { MessageContext } from './core/types.js'
+import { generateTraceId, createLogger } from './core/logger.js'
 import {
   checkMessengerConfig,
   checkAgentAvailability,
@@ -120,6 +121,10 @@ program
 
       // Set up message handler
       messenger.onMessage(async (ctx: MessageContext) => {
+        const traceId = generateTraceId()
+        ctx.traceId = traceId
+        ctx.logger = createLogger({ traceId, platform: ctx.platform, component: 'cli' })
+        ctx.logger.info({ event: 'message.received', text: ctx.message.text.substring(0, 120), userId: ctx.message.userId })
         await handleMessage(ctx, config.defaultAgent)
       })
 
@@ -185,11 +190,10 @@ program
  */
 async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise<void> {
   const { message, platform, channelId } = ctx
-  console.log(`[handleMessage] Received: "${message.text}" from ${message.threadId}`)
-  console.log(`[handleMessage] platform=${platform}, channelId=${channelId}`)
+  const traceId = ctx.traceId || generateTraceId()
+  const logger = ctx.logger || createLogger({ traceId, platform, component: 'cli' })
 
   const messengerName = platform === 'wechat' ? 'wechat-ilink' : platform
-  console.log(`[handleMessage] Getting messenger: ${messengerName}`)
   const messenger = registry.getMessenger(messengerName)
 
   if (!messenger) {
@@ -197,7 +201,6 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     return
   }
 
-  // Start typing indicator if supported
   const stopTyping = async () => {
     if (messenger.sendTyping) {
       try {
@@ -208,30 +211,28 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     }
   }
 
+  // Build route context with trace
+  const routeCtx: RouteContext = {
+    threadId: message.threadId,
+    channelId: ctx.channelId,
+    platform,
+    defaultAgent,
+    traceId,
+    logger,
+  }
+
   try {
-    // Send typing indicator
     if (messenger.sendTyping) {
-      messenger.sendTyping(message.threadId, true).catch(() => {
-        // Ignore typing errors
-      })
+      messenger.sendTyping(message.threadId, true).catch(() => {})
     }
 
-    // Parse the message
     const parsed = parseMessage(message.text)
-    console.log(`[handleMessage] Parsed:`, parsed)
+    logger.debug({ event: 'router.parse', parsed: parsed.type })
 
-    // Route to appropriate handler
-    const result = await routeMessage(parsed, {
-      threadId: message.threadId,
-      channelId: ctx.channelId,
-      platform,
-      defaultAgent,
-    })
-    console.log(`[handleMessage] Route result type:`, typeof result)
+    const result = await routeMessage(parsed, routeCtx)
 
     // Handle response (string or async generator)
     if (typeof result === 'string') {
-      console.log(`[handleMessage] Sending string response:`, result.substring(0, 100))
       await stopTyping()
 
       // For Feishu, use cards for better formatting
@@ -245,20 +246,18 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
       } else {
         await messenger.sendMessage(message.threadId, result)
       }
+
+      logger.info({ event: 'message.sent', responseLen: result.length })
     } else {
       // Stream response chunks
-      console.log(`[handleMessage] Streaming response...`)
       let fullResponse = ''
       for await (const chunk of result) {
         fullResponse += chunk
-        console.log(`[handleMessage] Chunk received, length:`, chunk.length)
       }
 
       await stopTyping()
 
       if (fullResponse) {
-        console.log(`[handleMessage] Full response length:`, fullResponse.length)
-
         // For Feishu, use cards for better formatting
         if (platform === 'feishu' && messenger.sendCard) {
           const { CardBuilder } = await import('./plugins/messengers/feishu/card-builder.js')
@@ -270,17 +269,21 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
         } else {
           await messenger.sendMessage(message.threadId, fullResponse)
         }
+
+        logger.info({ event: 'message.sent', responseLen: fullResponse.length })
       } else {
-        console.log(`[handleMessage] No response generated`)
+        logger.warn({ event: 'message.empty_response' })
       }
     }
   } catch (error) {
-    console.error('Error handling message:', error)
+    const errMsg = error instanceof Error ? error.message : String(error)
+    logger.error({ event: 'message.error', error: errMsg })
     await stopTyping()
-    await messenger.sendMessage(
-      message.threadId,
-      '❌ An error occurred processing your message. Please try again.'
-    )
+    try {
+      await messenger.sendMessage(message.threadId, '❌ An error occurred processing your message.')
+    } catch {
+      // Ignore
+    }
   }
 }
 

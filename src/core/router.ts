@@ -1,9 +1,20 @@
 // Message router — parses commands and routes to agents
 
-import type { ParsedMessage, MessageContext, ChatMessage } from './types.js'
+import type { ParsedMessage, ChatMessage } from './types.js'
+import type { Logger } from 'pino'
 import { registry } from './registry.js'
 import { sessionManager } from './session.js'
 import { isAgentAvailableCached, formatAgentNotAvailableError } from './onboarding.js'
+
+/** Route context passed through the routing pipeline */
+export interface RouteContext {
+  channelId: string
+  threadId: string
+  platform: string
+  defaultAgent: string
+  traceId: string
+  logger: Logger
+}
 
 /** Built-in coding agent commands forwarded to the active agent */
 const AGENT_COMMANDS = new Set(['test', 'review', 'commit', 'push', 'diff', 'shell', 'bug', 'explain'])
@@ -59,7 +70,7 @@ export function parseMessage(text: string): ParsedMessage {
  */
 export async function routeMessage(
   parsed: ParsedMessage,
-  ctx: { channelId: string; threadId: string; platform: string; defaultAgent: string }
+  ctx: RouteContext
 ): Promise<string | AsyncGenerator<string>> {
   switch (parsed.type) {
     case 'command': {
@@ -143,20 +154,19 @@ async function callAgentWithHistory(
   sessionId: string,
   prompt: string,
   history: ChatMessage[],
-  ctx: { channelId: string; threadId: string; platform: string }
+  ctx: RouteContext
 ): Promise<string | AsyncGenerator<string>> {
-  // Save user message
   await sessionManager.addMessage(ctx.platform, ctx.channelId, ctx.threadId, {
     role: 'user',
     content: prompt,
     timestamp: new Date()
   })
 
-  // Call agent with history
+  const startTime = Date.now()
+  ctx.logger.info({ event: 'agent.invoke.start', agent: agent!.name, promptLen: prompt.length, historyLen: history.length })
+
   const generator = agent!.sendPrompt(sessionId, prompt, history)
 
-  // For streaming responses, we need to collect the full response to save it
-  // Return a wrapper generator that saves the response when complete
   return (async function* (): AsyncGenerator<string> {
     let fullResponse = ''
     try {
@@ -165,7 +175,7 @@ async function callAgentWithHistory(
         yield chunk
       }
     } finally {
-      // Save assistant response (only if we got some content)
+      const durationMs = Date.now() - startTime
       if (fullResponse.trim()) {
         await sessionManager.addMessage(ctx.platform, ctx.channelId, ctx.threadId, {
           role: 'assistant',
@@ -173,13 +183,19 @@ async function callAgentWithHistory(
           timestamp: new Date()
         })
       }
+      ctx.logger.info({
+        event: 'agent.invoke.end',
+        agent: agent!.name,
+        durationMs,
+        responseLen: fullResponse.length,
+      })
     }
   })()
 }
 
 async function handleBuiltInCommand(
   command: 'start' | 'status' | 'help' | 'agents' | 'new',
-  ctx: { channelId: string; threadId: string; platform: string }
+  _ctx: RouteContext
 ): Promise<string> {
   switch (command) {
     case 'start':
@@ -199,7 +215,7 @@ async function handleBuiltInCommand(
       return `🤖 Available Agents\n\n${agents.map(a => `• ${a}`).join('\n')}\n\nUse /<agent> to switch.`
 
     case 'new':
-      const session = await sessionManager.resetConversation(ctx.platform, ctx.channelId, ctx.threadId)
+      const session = await sessionManager.resetConversation(_ctx.platform, _ctx.channelId, _ctx.threadId)
       if (session) {
         return `🆕 New conversation started with ${session.agent}.\n\nPrevious context has been cleared.`
       }
@@ -210,7 +226,7 @@ async function handleBuiltInCommand(
 async function handleAgentCommand(
   command: string,
   prompt: string,
-  ctx: { channelId: string; threadId: string; platform: string; defaultAgent: string }
+  ctx: RouteContext
 ): Promise<string | AsyncGenerator<string>> {
   const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
   const agentName = existingSession?.agent || ctx.defaultAgent

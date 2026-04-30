@@ -7,9 +7,10 @@ import { fileURLToPath } from 'url'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
 import { WebSocketServer, type WebSocket } from 'ws'
-import { parseMessage, routeMessage } from '../core/router.js'
+import { parseMessage, routeMessage, type RouteContext } from '../core/router.js'
 import { sessionManager } from '../core/session.js'
 import { registry } from '../core/registry.js'
+import { generateTraceId, createLogger } from '../core/logger.js'
 import {
   isAgentAvailableCached,
   loadConfig,
@@ -313,22 +314,28 @@ async function handleClientMessage(
       if (!msg.text?.trim()) return
 
       const text = msg.text.trim()
+      const traceId = generateTraceId()
+      const logger = createLogger({ traceId, platform: 'web', component: 'web' })
 
-      // Handle agent switch request
       if (msg.agent && msg.agent !== client.agent) {
         client.agent = msg.agent
       }
 
-      // Parse and route through existing router
       const parsed = parseMessage(text)
 
       try {
-        const result = await routeMessage(parsed, {
+        const routeCtx: RouteContext = {
           threadId: clientId,
           channelId: 'web',
           platform: 'web',
           defaultAgent: client.agent,
-        })
+          traceId,
+          logger,
+        }
+
+        logger.info({ event: 'message.received', text: text.substring(0, 120) })
+
+        const result = await routeMessage(parsed, routeCtx)
 
         // String response (built-in commands, errors)
         if (typeof result === 'string') {
