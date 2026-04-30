@@ -17,6 +17,7 @@ import type {
 
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com'
 const CHANNEL_VERSION = '1.0.0'
+const FETCH_TIMEOUT = 30000 // 30 seconds for HTTP calls
 
 export class ILinkClient {
   private baseUrl: string
@@ -149,6 +150,7 @@ export class ILinkClient {
       method: 'POST',
       headers: this.getAuthHeaders(),
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
     })
 
     if (!response.ok) {
