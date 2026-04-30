@@ -15,6 +15,7 @@ import { handleScheduleCommand } from './commands/schedule.js'
 import { logInvocation } from './audit-log.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { classifyIntent } from './intent.js'
+import { classifyWithLLM, getLLMJudge } from './intent-llm.js'
 import { userLimiter } from './rate-limiter.js'
 import { workspaceRegistry } from './workspace.js'
 import { getJob } from './job-board.js'
@@ -232,16 +233,38 @@ export async function routeMessage(
       const stickyAgent = existingSession?.agent
       let agentName: string
       let intent: string = 'fallback'
+      let ruleScore = 0
 
       try {
         const classification = classifyIntent(parsed.prompt, stickyAgent, ctx.logger)
         agentName = classification.agent
         intent = classification.triggeredBy
+        ruleScore = classification.score
         ctx.logger.info({ event: 'router.intent', agent: agentName, intent, score: classification.score, reason: classification.reason })
       } catch {
         agentName = stickyAgent || ctx.defaultAgent
         ctx.logger.warn({ event: 'router.intent.failed', fallback: agentName })
       }
+
+      // P2-H: when the rule-based classifier produced a low-confidence
+      // pick (no topic/keyword match) and an LLM judge is configured,
+      // ask the judge. We only consider it for *non-sticky* requests so
+      // active conversations stay deterministic.
+      const judge = getLLMJudge()
+      if (judge && intent === 'fallback' && ruleScore < (judge.threshold ?? 1.0) && !stickyAgent) {
+        const candidates = workspaceRegistry.resolve(ctx.userId || 'unknown').agentWhitelist.size === 0
+          ? registry.listAgents().filter((a) => !circuitBreaker.isOpen(a))
+          : registry.listAgents().filter((a) =>
+              !circuitBreaker.isOpen(a) &&
+              workspaceRegistry.resolve(ctx.userId || 'unknown').hasAgent(a))
+        const picked = await classifyWithLLM(parsed.prompt, candidates, (n) => registry.findAgent(n))
+        if (picked) {
+          agentName = picked.agent
+          intent = 'llm'
+          ctx.logger.info({ event: 'router.intent.llm', agent: agentName, reason: picked.reason })
+        }
+      }
+
       // Stash on ctx so callAgentWithHistory writes it into the audit row.
       ctx.intent = intent
 
