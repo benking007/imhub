@@ -12,6 +12,7 @@ import { handleRouterCommand } from './commands/router.js'
 import { logInvocation } from './audit-log.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { classifyIntent } from './intent.js'
+import { userLimiter } from './rate-limiter.js'
 
 /** Route context passed through the routing pipeline */
 export interface RouteContext {
@@ -129,6 +130,13 @@ export async function routeMessage(
     }
 
     case 'default': {
+      // Rate limit check (per user)
+      const limitKey = `${ctx.platform}:${ctx.userId || 'unknown'}`
+      if (!userLimiter.allow(limitKey)) {
+        const s = userLimiter.status(limitKey)
+        return `⏱️ 请求过于频繁，请稍后再试。（${s.rate} 次/${s.intervalSec}秒，当前剩余 ${s.remaining}）`
+      }
+
       const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
 
       // Use intent classifier to pick best agent
