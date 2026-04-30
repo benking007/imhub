@@ -1,0 +1,126 @@
+# im-hub → 智能网关 · 升级路线图
+
+> 目标：将 im-hub 从"IM → 多 Agent 桥接器"升级为 **IM 前端 + 多 Agent 后端的智能路由层**
+> 最后更新：2026-04-30
+> 当前分支：feat/gateway-phase1
+
+---
+
+## 愿景
+
+用户通过任意 IM（微信 / Telegram / 飞书 / Web Chat）发送自然语言请求，系统自动完成：
+1. 身份验证 & 权限 & 预算检查
+2. 意图识别 → 选择最合适的 Agent（或回退到备选）
+3. Agent 执行（带超时、重试、流式返回）
+4. 结果流回用户 IM + 全链路审计记录
+
+---
+
+## Phase 1 · 底座加固（1-2 周）
+
+> 目标：安全性 + 可运维性达标，为后续架构升级扫清障碍。
+
+### 1.1 P0 安全修复
+
+- [ ] P0-1 session 文件路径消毒（防路径注入）
+- [ ] P0-2 Web API 鉴权（随机 token + loopback-only + header 校验）
+- [ ] P0-3 Config PUT mask 回写修复
+- [ ] P0-4 opencode extractText 收紧（白名单 type）
+- [ ] P0-5 opencode timeout 可配置
+- [ ] P0-6/7 确认 src 中无 Teams/Slack/wechaty 死代码
+
+### 1.2 结构化日志
+
+- [ ] 引入 pino + pino-pretty
+- [ ] traceId 贯穿 messenger → router → agent → reply
+- [ ] Agent invocation span（start/end/duration/cost/outcome）
+- [ ] 日志级别可配（LOG_LEVEL env）
+- [ ] 敏感字段脱敏（token、secret 不出现在日志）
+
+### 1.3 基础设施
+
+- [ ] Config schema 校验（zod）：启动时校验 config.json 结构，防止格式错导致运行时崩溃
+- [ ] AgentBase 抽象：统一生命周期、signal、timeout、stream、usage、health
+- [ ] Router 拆分：命令分离到 `commands/*.ts`
+- [ ] Agent health 定期探活（替代永久缓存）
+
+---
+
+## Phase 2 · 智能路由 Brain（2-4 周）
+
+> 目标：从"用户手动选 agent" → "系统自动按意图路由"。
+
+### 2.1 意图分类
+
+- [ ] Intent classifier（规则引擎先行，轻量 LLM 升级）
+- [ ] 命令检测 / sticky session / topic matching / fallback 策略
+- [ ] `/router policy` 可查看当前路由策略
+- [ ] `/router explain` 解释为何路由到某 agent
+
+### 2.2 Agent 画像
+
+- [ ] Agent 能力画像表（擅长域 / cost / latency / health / quota）
+- [ ] Fallback cascade：主挂 → 次选，继承会话
+- [ ] Circuit breaker：连续失败 N 次 → 自动摘除
+
+### 2.3 可观测性
+
+- [ ] Audit log (sqlite)：user × intent × agent × duration × cost × outcome
+- [ ] Metrics（latency p50/p95/p99、error rate、cost per session）
+
+### 2.4 预算与限流
+
+- [ ] Per-user quota / budget
+- [ ] Rate-limit token bucket（用户级 + agent 级）
+- [ ] 预算告警与拒绝
+
+---
+
+## Phase 3 · 网关全貌（4+ 周）
+
+> 目标：多租户、多上下游、完整生命周期管理。
+
+### 3.1 多租户
+
+- [ ] Multi-tenant registry（按 workspace 隔离）
+- [ ] RBAC：IM 用户 → role → agent/quota 绑定
+- [ ] Per-workspace config、session、audit 隔离
+
+### 3.2 ACP 深化
+
+- [ ] ACP Server 模式：im-hub 本身可作为 Agent 被上游调用
+- [ ] ACP Client session 保持（跨越 HTTP 无状态）
+- [ ] ACP agent 发现与自动注册
+
+### 3.3 Job Board
+
+- [ ] 升级版子任务系统：Web UI 任务列表 / 调度 / 重跑 / 导出
+- [ ] 定时任务（cron 触发） + webhook 回调
+- [ ] 长任务状态持久化与恢复
+
+### 3.4 下游网关
+
+- [ ] Outgoing webhook：外部系统 → im-hub → Agent → IM 回复
+- [ ] REST API（带鉴权）供第三方系统调用
+
+---
+
+## 度量指标
+
+| 指标 | 当前基线 | Phase 1 目标 | Phase 2 目标 |
+|------|----------|--------------|--------------|
+| Agent P95 latency | 未知 | 可度量 | < 60s |
+| Agent error rate | 未知 | 可度量 | < 5% |
+| 日志查询能力 | grep | JSON + jq | audit SQL |
+| 安全 — 未授权 API 访问 | 可访问 | 不可访问 | RBAC |
+| Hot-reload config | 否 | 否 | 是 |
+| Agent fallback | 无 | 无 | 自动 |
+| Multi-tenant | 否 | 否 | 是 |
+
+---
+
+## 变更记录
+
+| 日期 | 变更 | 作者 |
+|------|------|------|
+| 2026-04-30 | 初始版本，Phase 1 开 | opencode |
