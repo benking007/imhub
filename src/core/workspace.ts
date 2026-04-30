@@ -33,6 +33,8 @@ export class Workspace {
   }
 
   hasAgent(agent: string): boolean {
+    // Empty whitelist = unrestricted. Named whitelist enforces membership.
+    if (this.agentWhitelist.size === 0) return true
     return this.agentWhitelist.has(agent)
   }
 
@@ -51,10 +53,13 @@ export class WorkspaceRegistry {
   private defaultWorkspace: Workspace
 
   constructor() {
+    // Default workspace is unrestricted (empty whitelist) so any registered
+    // agent — including ACP-added custom agents — is reachable without
+    // explicit workspace configuration.
     this.defaultWorkspace = new Workspace({
       id: 'default',
       name: 'Default',
-      agents: ['claude-code', 'codex', 'copilot', 'opencode'],
+      agents: [],
     })
     this.workspaces.set('default', this.defaultWorkspace)
   }

@@ -12,33 +12,47 @@ const AUDIT_DIR = join(homedir(), '.im-hub')
 const AUDIT_DB = join(AUDIT_DIR, 'audit.db')
 
 let db: Database.Database | null = null
+let dbBroken = false
 
-function getDb(): Database.Database {
+function getDb(): Database.Database | null {
+  if (dbBroken) return null
   if (!db) {
-    mkdirSync(AUDIT_DIR, { recursive: true })
-    db = new Database(AUDIT_DB)
-    db.pragma('journal_mode = WAL')
-    db.pragma('synchronous = NORMAL')
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS invocations (
-        id        INTEGER PRIMARY KEY AUTOINCREMENT,
-        trace_id  TEXT    NOT NULL,
-        ts        TEXT    NOT NULL DEFAULT (datetime('now')),
-        user_id   TEXT    NOT NULL DEFAULT '',
-        platform  TEXT    NOT NULL DEFAULT '',
-        agent     TEXT    NOT NULL,
-        intent    TEXT    NOT NULL DEFAULT 'default',
-        prompt_len INTEGER NOT NULL DEFAULT 0,
-        response_len INTEGER NOT NULL DEFAULT 0,
-        duration_ms INTEGER NOT NULL DEFAULT 0,
-        cost      REAL    NOT NULL DEFAULT 0.0,
-        success   INTEGER NOT NULL DEFAULT 1,
-        error     TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_inv_ts ON invocations(ts);
-      CREATE INDEX IF NOT EXISTS idx_inv_agent ON invocations(agent);
-      CREATE INDEX IF NOT EXISTS idx_inv_trace ON invocations(trace_id);
-    `)
+    try {
+      mkdirSync(AUDIT_DIR, { recursive: true })
+      db = new Database(AUDIT_DB)
+      db.pragma('journal_mode = WAL')
+      db.pragma('synchronous = NORMAL')
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS invocations (
+          id        INTEGER PRIMARY KEY AUTOINCREMENT,
+          trace_id  TEXT    NOT NULL,
+          ts        TEXT    NOT NULL DEFAULT (datetime('now')),
+          user_id   TEXT    NOT NULL DEFAULT '',
+          platform  TEXT    NOT NULL DEFAULT '',
+          agent     TEXT    NOT NULL,
+          intent    TEXT    NOT NULL DEFAULT 'default',
+          prompt_len INTEGER NOT NULL DEFAULT 0,
+          response_len INTEGER NOT NULL DEFAULT 0,
+          duration_ms INTEGER NOT NULL DEFAULT 0,
+          cost      REAL    NOT NULL DEFAULT 0.0,
+          success   INTEGER NOT NULL DEFAULT 1,
+          error     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_inv_ts ON invocations(ts);
+        CREATE INDEX IF NOT EXISTS idx_inv_agent ON invocations(agent);
+        CREATE INDEX IF NOT EXISTS idx_inv_trace ON invocations(trace_id);
+      `)
+    } catch (err) {
+      // Native module unavailable (bun runtime) or disk error — skip auditing,
+      // never fail the request pipeline.
+      dbBroken = true
+      db = null
+      const msg = err instanceof Error ? err.message : String(err)
+      if (process.env.LOG_LEVEL !== 'silent') {
+        console.warn(`[audit-log] disabled: ${msg}`)
+      }
+      return null
+    }
   }
   return db
 }
@@ -59,13 +73,18 @@ export interface AuditRecord {
 
 export function logInvocation(rec: AuditRecord): void {
   const d = getDb()
-  const stmt = d.prepare(`
-    INSERT INTO invocations (trace_id, user_id, platform, agent, intent, prompt_len, response_len, duration_ms, cost, success, error)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `)
-  stmt.run(rec.traceId, rec.userId, rec.platform, rec.agent, rec.intent,
-    rec.promptLen, rec.responseLen, rec.durationMs, rec.cost,
-    rec.success ? 1 : 0, rec.error || null)
+  if (!d) return
+  try {
+    const stmt = d.prepare(`
+      INSERT INTO invocations (trace_id, user_id, platform, agent, intent, prompt_len, response_len, duration_ms, cost, success, error)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    stmt.run(rec.traceId, rec.userId, rec.platform, rec.agent, rec.intent,
+      rec.promptLen, rec.responseLen, rec.durationMs, rec.cost,
+      rec.success ? 1 : 0, rec.error || null)
+  } catch {
+    // Best-effort logging; never fail the request because of audit IO
+  }
 }
 
 export interface QueryOpts {
@@ -93,29 +112,43 @@ export interface InvocationRow {
 
 export function queryInvocations(opts: QueryOpts = {}): InvocationRow[] {
   const d = getDb()
+  if (!d) return []
   const conditions: string[] = []
   const params: unknown[] = []
 
   if (opts.agent) { conditions.push('agent = ?'); params.push(opts.agent) }
   if (opts.platform) { conditions.push('platform = ?'); params.push(opts.platform) }
-  if (opts.days) { conditions.push("ts >= datetime('now', ?)"); params.push(`-${opts.days} days`) }
+  if (opts.days && Number.isFinite(opts.days) && opts.days > 0) {
+    conditions.push("ts >= datetime('now', ?)")
+    params.push(`-${Math.floor(opts.days)} days`)
+  }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
-  const limit = opts.limit || 20
+  const rawLimit = opts.limit
+  const limit = Number.isFinite(rawLimit) && rawLimit! > 0 ? Math.min(Math.floor(rawLimit!), 1000) : 20
 
-  return d.prepare(`SELECT * FROM invocations ${where} ORDER BY ts DESC LIMIT ?`)
-    .all(...params, limit) as InvocationRow[]
+  try {
+    return d.prepare(`SELECT * FROM invocations ${where} ORDER BY ts DESC LIMIT ?`)
+      .all(...params, limit) as InvocationRow[]
+  } catch {
+    return []
+  }
 }
 
 export function getStats(): { total: number; byAgent: Record<string, number>; totalCost: number } {
   const d = getDb()
-  const total = (d.prepare('SELECT COUNT(*) as n FROM invocations').get() as { n: number }).n
-  const rows = d.prepare('SELECT agent, COUNT(*) as n, SUM(cost) as total_cost FROM invocations GROUP BY agent').all() as Array<{ agent: string; n: number; total_cost: number }>
-  const byAgent: Record<string, number> = {}
-  let totalCost = 0
-  for (const r of rows) {
-    byAgent[r.agent] = r.n
-    totalCost += r.total_cost
+  if (!d) return { total: 0, byAgent: {}, totalCost: 0 }
+  try {
+    const total = (d.prepare('SELECT COUNT(*) as n FROM invocations').get() as { n: number }).n
+    const rows = d.prepare('SELECT agent, COUNT(*) as n, SUM(cost) as total_cost FROM invocations GROUP BY agent').all() as Array<{ agent: string; n: number; total_cost: number | null }>
+    const byAgent: Record<string, number> = {}
+    let totalCost = 0
+    for (const r of rows) {
+      byAgent[r.agent] = r.n
+      totalCost += r.total_cost || 0
+    }
+    return { total, byAgent, totalCost }
+  } catch {
+    return { total: 0, byAgent: {}, totalCost: 0 }
   }
-  return { total, byAgent, totalCost }
 }

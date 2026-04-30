@@ -1,9 +1,10 @@
 // Unit tests for message router
 
 import { describe, it, expect, beforeEach, vi } from 'bun:test'
-import { parseMessage, routeMessage } from '../../src/core/router'
+import { parseMessage, routeMessage, type RouteContext } from '../../src/core/router'
 import { registry } from '../../src/core/registry'
 import type { AgentAdapter } from '../../src/core/types'
+import type { Logger } from 'pino'
 
 // Mock agent for testing
 async function* mockGenerator(): AsyncGenerator<string> {
@@ -15,6 +16,30 @@ const mockAgent: AgentAdapter = {
   aliases: ['ta', 'testagent'],
   isAvailable: vi.fn().mockResolvedValue(true),
   sendPrompt: vi.fn().mockImplementation(() => mockGenerator()),
+}
+
+// No-op logger for tests — satisfies the structural shape pino exposes
+const noopLogger = (() => {
+  const noop = (..._args: unknown[]) => {}
+  const stub: Record<string, unknown> = {
+    info: noop, warn: noop, error: noop, debug: noop, trace: noop, fatal: noop,
+    level: 'info', bindings: () => ({}),
+  }
+  stub.child = () => stub
+  return stub as unknown as Logger
+})()
+
+function makeCtx(overrides: Partial<RouteContext> = {}): RouteContext {
+  return {
+    threadId: 'thread-1',
+    channelId: 'channel-1',
+    platform: 'wechat',
+    defaultAgent: 'test-agent',
+    traceId: 'trace-test',
+    logger: noopLogger,
+    userId: 'user-1',
+    ...overrides,
+  }
 }
 
 describe('parseMessage', () => {
@@ -152,10 +177,42 @@ describe('parseMessage', () => {
       }
     })
   })
+
+  describe('Phase 2/3 commands', () => {
+    it('parses /audit with args', () => {
+      const result = parseMessage('/audit agent=opencode days=7')
+      expect(result).toEqual({ type: 'audit', args: 'agent=opencode days=7' })
+    })
+
+    it('parses /router with args', () => {
+      const result = parseMessage('/router explain hello world')
+      expect(result).toEqual({ type: 'router', args: 'explain hello world' })
+    })
+
+    it('parses /job and /task as aliases', () => {
+      expect(parseMessage('/job list')).toEqual({ type: 'job', args: 'list' })
+      expect(parseMessage('/task list')).toEqual({ type: 'job', args: 'list' })
+    })
+
+    it('parses /tasks shorthand to job list', () => {
+      expect(parseMessage('/tasks')).toEqual({ type: 'job', args: 'list' })
+    })
+
+    it('parses /check, /cancel, /switch, /collect as job sub-commands', () => {
+      expect(parseMessage('/check 5')).toEqual({ type: 'job', args: 'check 5' })
+      expect(parseMessage('/cancel 5')).toEqual({ type: 'job', args: 'cancel 5' })
+      expect(parseMessage('/switch main')).toEqual({ type: 'job', args: 'switch main' })
+      expect(parseMessage('/collect 5')).toEqual({ type: 'job', args: 'collect 5' })
+    })
+
+    it('parses /new built-in command', () => {
+      expect(parseMessage('/new')).toEqual({ type: 'command', command: 'new' })
+    })
+  })
 })
 
 describe('routeMessage', () => {
-  const ctx = { threadId: 'thread-1', platform: 'wechat', defaultAgent: 'test-agent' }
+  const ctx = makeCtx()
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -225,12 +282,20 @@ describe('routeMessage', () => {
       expect(text).toContain('test response')
     })
 
-    it('should error when default agent not configured', async () => {
+    it('should fall through to intent-classified agent even when default not configured', async () => {
+      // With Phase 2 intent routing the default-agent name only matters as a
+      // fallback when classifyIntent throws. As long as any agent is
+      // registered, the router returns an AsyncGenerator pointing at the
+      // chosen agent (which agent depends on PROFILES/circuit state and is
+      // not asserted here — that is intent.test.ts's job).
       const result = await routeMessage(
         { type: 'default', prompt: 'hello' },
-        { ...ctx, defaultAgent: 'nonexistent' }
+        makeCtx({ threadId: 'thread-no-default', defaultAgent: 'nonexistent', userId: 'user-no-default' })
       )
-      expect(result).toContain('not configured')
+      expect(typeof result).not.toBe('string')
+      // Drain the generator without asserting the body — different test
+      // ordering may register additional stub agents.
+      for await (const _ of result as AsyncGenerator<string>) { /* drain */ }
     })
   })
 
@@ -264,7 +329,7 @@ describe('routeMessage', () => {
     it('should return error when no agent found for agentCommand', async () => {
       const result = await routeMessage(
         { type: 'agentCommand', command: 'test', prompt: '' },
-        { threadId: 'thread-no-agent', platform: 'wechat', defaultAgent: 'nonexistent' }
+        makeCtx({ threadId: 'thread-no-agent', defaultAgent: 'nonexistent' })
       )
       expect(result).toContain('not found')
     })
