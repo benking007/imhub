@@ -9,6 +9,7 @@ import { handleBuiltInCommand } from './commands/builtin.js'
 import { handleAgentCommand } from './commands/agent.js'
 import { handleAuditCommand } from './commands/audit.js'
 import { handleRouterCommand } from './commands/router.js'
+import { handleJobCommand } from './commands/job.js'
 import { logInvocation } from './audit-log.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { classifyIntent } from './intent.js'
@@ -60,6 +61,7 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'new') return { type: 'command', command: 'new' }
   if (cmd === 'audit') return { type: 'audit', args: rest }
   if (cmd === 'router') return { type: 'router', args: rest }
+  if (cmd === 'job') return { type: 'job', args: rest }
 
   // Check if it's an agent alias (registered agents take priority over generic commands)
   const agent = registry.findAgent(cmd)
@@ -98,6 +100,10 @@ export async function routeMessage(
 
     case 'router': {
       return handleRouterCommand(parsed.args, ctx)
+    }
+
+    case 'job': {
+      return handleJobCommand(parsed.args, ctx)
     }
 
     case 'agent': {
