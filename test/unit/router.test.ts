@@ -209,6 +209,11 @@ describe('parseMessage', () => {
     it('parses /new built-in command', () => {
       expect(parseMessage('/new')).toEqual({ type: 'command', command: 'new' })
     })
+
+    it('parses /workspaces and /ws as aliases', () => {
+      expect(parseMessage('/workspaces list')).toEqual({ type: 'workspaces', args: 'list' })
+      expect(parseMessage('/ws list')).toEqual({ type: 'workspaces', args: 'list' })
+    })
   })
 })
 

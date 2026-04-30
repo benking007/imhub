@@ -99,6 +99,9 @@ export async function startWebServer(options: {
     if (url.pathname === '/api/agents/acp/test' && req.method === 'POST') {
       return handleAcpTest(req, res)
     }
+    if (url.pathname === '/api/workspaces' && req.method === 'GET') {
+      return handleListWorkspaces(req, res)
+    }
 
     res.writeHead(404)
     res.end('Not found')
@@ -277,6 +280,16 @@ async function handleAgentsStatus(_req: IncomingMessage, res: ServerResponse): P
     sendJson(res, 200, agentStatus)
   } catch (err) {
     sendJson(res, 500, { error: 'Failed to check agents' })
+  }
+}
+
+async function handleListWorkspaces(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const { workspaceRegistry } = await import('../core/workspace.js')
+    sendJson(res, 200, { workspaces: workspaceRegistry.list() })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    sendJson(res, 500, { error: msg })
   }
 }
 

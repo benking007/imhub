@@ -45,6 +45,15 @@ export class RateLimiter {
     }
   }
 
+  /** Read the bucket's static configuration (no key required). */
+  config(): { rate: number; intervalSec: number; burst: number } {
+    return {
+      rate: this.rate,
+      intervalSec: Math.round(this.intervalMs / 1000),
+      burst: this.burst,
+    }
+  }
+
   /**
    * Best-effort estimate (epoch ms) of when the next token will be available
    * for `key`. If the bucket already has tokens, returns now.

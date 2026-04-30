@@ -14,8 +14,22 @@ const log = rootLogger.child({ component: 'audit-log' })
 const AUDIT_DIR = join(homedir(), '.im-hub')
 const AUDIT_DB = join(AUDIT_DIR, 'audit.db')
 
+/** Default number of days to keep audit rows. Override via env. */
+function resolveRetentionDays(): number {
+  const raw = process.env.IM_HUB_AUDIT_RETENTION_DAYS
+  if (raw) {
+    const n = parseInt(raw, 10)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return 30
+}
+
+/** How often to run the retention sweep (epoch-ms). 0 disables. */
+const RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000  // 6 hours
+
 let db: Database.Database | null = null
 let dbBroken = false
+let sweepTimer: ReturnType<typeof setInterval> | null = null
 
 function getDb(): Database.Database | null {
   if (dbBroken) return null
@@ -48,6 +62,17 @@ function getDb(): Database.Database | null {
         CREATE INDEX IF NOT EXISTS idx_inv_platform ON invocations(platform);
         CREATE INDEX IF NOT EXISTS idx_inv_intent ON invocations(intent);
       `)
+      // Run a sweep on first init, then on a 6h timer.
+      pruneExpired(db)
+      if (RETENTION_SWEEP_INTERVAL_MS > 0 && sweepTimer === null) {
+        sweepTimer = setInterval(() => {
+          if (db) pruneExpired(db)
+        }, RETENTION_SWEEP_INTERVAL_MS)
+        // Don't keep the process alive just for sweeping.
+        if (typeof sweepTimer === 'object' && sweepTimer && 'unref' in sweepTimer) {
+          (sweepTimer as { unref: () => void }).unref()
+        }
+      }
     } catch (err) {
       // Native module unavailable (bun runtime) or disk error — skip auditing,
       // never fail the request pipeline.
@@ -140,6 +165,36 @@ export function queryInvocations(opts: QueryOpts = {}): InvocationRow[] {
       .all(...params, limit) as InvocationRow[]
   } catch {
     return []
+  }
+}
+
+/**
+ * Delete rows older than the retention window. Returns number of deleted
+ * rows so callers / tests can assert behavior.
+ */
+export function pruneExpired(d: Database.Database = getDb()!): number {
+  if (!d) return 0
+  const days = resolveRetentionDays()
+  try {
+    const info = d.prepare("DELETE FROM invocations WHERE ts < datetime('now', ?)")
+      .run(`-${days} days`)
+    if (info.changes > 0) {
+      log.info({ event: 'audit-log.pruned', deleted: info.changes, days },
+        `Pruned ${info.changes} audit row(s) older than ${days}d`)
+    }
+    return info.changes
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log.warn({ event: 'audit-log.prune.failed', error: msg }, 'audit-log retention sweep failed')
+    return 0
+  }
+}
+
+/** Stop the periodic retention sweep (used by tests and graceful shutdown). */
+export function stopRetentionSweep(): void {
+  if (sweepTimer) {
+    clearInterval(sweepTimer)
+    sweepTimer = null
   }
 }
 

@@ -90,6 +90,26 @@ export class WorkspaceRegistry {
     }
   }
 
+  /**
+   * Return summaries of every registered workspace, including the default.
+   * Used by `/workspaces` and the Web settings UI.
+   */
+  list(): Array<{
+    id: string
+    name: string
+    agents: string[]
+    members: number | null  // null = open workspace
+    rateLimit: { rate: number; intervalSec: number; burst: number }
+  }> {
+    return Array.from(this.workspaces.values()).map((ws) => ({
+      id: ws.id,
+      name: ws.name,
+      agents: Array.from(ws.agentWhitelist),
+      members: ws.memberSet ? ws.memberSet.size : null,
+      rateLimit: ws.limiter.config(),
+    }))
+  }
+
   get default(): Workspace { return this.defaultWorkspace }
 }
 
