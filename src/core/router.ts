@@ -26,6 +26,9 @@ export interface RouteContext {
   traceId: string
   logger: Logger
   userId?: string
+  /** Set by the routing layer when intent classification picks the agent.
+   * Audit log records this so we can answer "why was this agent chosen?". */
+  intent?: string
 }
 
 /** Built-in coding agent commands forwarded to the active agent */
@@ -167,6 +170,7 @@ export async function routeMessage(
       const session = await sessionManager.getOrCreateSession(
         ctx.platform, ctx.channelId, ctx.threadId, agent.name
       )
+      ctx.intent = 'explicit'
       return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx)
     }
 
@@ -226,6 +230,8 @@ export async function routeMessage(
         agentName = stickyAgent || ctx.defaultAgent
         ctx.logger.warn({ event: 'router.intent.failed', fallback: agentName })
       }
+      // Stash on ctx so callAgentWithHistory writes it into the audit row.
+      ctx.intent = intent
 
       const agent = registry.findAgent(agentName)
       if (!agent) {
@@ -313,17 +319,24 @@ export async function callAgentWithHistory(
         responseLen: fullResponse.length,
       })
 
-      // Write audit record + update circuit breaker
+      // Write audit record + update circuit breaker. Cost defaults to 0
+      // for adapters that don't surface usage; future per-agent enrichers
+      // can attach a `lastUsageCost` getter for token-based pricing.
+      const costFn = (agent as unknown as { getLastCost?: () => number })?.getLastCost
+      const cost = typeof costFn === 'function' ? Number(costFn.call(agent)) || 0 : 0
+
       logInvocation({
         traceId: ctx.traceId,
         userId: ctx.userId || 'unknown',
         platform: ctx.platform,
         agent: agent!.name,
-        intent: 'default',
+        // Carry the intent the router picked (or 'explicit' for /<agent>
+        // commands which set ctx.intent='explicit' upstream).
+        intent: ctx.intent || 'default',
         promptLen: prompt.length,
         responseLen: fullResponse.length,
         durationMs,
-        cost: 0,
+        cost,
         success: !invocationError,
         error: invocationError,
       })

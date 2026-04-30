@@ -41,6 +41,9 @@ function getDb(): Database.Database | null {
         CREATE INDEX IF NOT EXISTS idx_inv_ts ON invocations(ts);
         CREATE INDEX IF NOT EXISTS idx_inv_agent ON invocations(agent);
         CREATE INDEX IF NOT EXISTS idx_inv_trace ON invocations(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_inv_user ON invocations(user_id);
+        CREATE INDEX IF NOT EXISTS idx_inv_platform ON invocations(platform);
+        CREATE INDEX IF NOT EXISTS idx_inv_intent ON invocations(intent);
       `)
     } catch (err) {
       // Native module unavailable (bun runtime) or disk error — skip auditing,
@@ -91,6 +94,8 @@ export interface QueryOpts {
   limit?: number
   agent?: string
   platform?: string
+  userId?: string
+  intent?: string
   days?: number
 }
 
@@ -118,6 +123,8 @@ export function queryInvocations(opts: QueryOpts = {}): InvocationRow[] {
 
   if (opts.agent) { conditions.push('agent = ?'); params.push(opts.agent) }
   if (opts.platform) { conditions.push('platform = ?'); params.push(opts.platform) }
+  if (opts.userId) { conditions.push('user_id = ?'); params.push(opts.userId) }
+  if (opts.intent) { conditions.push('intent = ?'); params.push(opts.intent) }
   if (opts.days && Number.isFinite(opts.days) && opts.days > 0) {
     conditions.push("ts >= datetime('now', ?)")
     params.push(`-${Math.floor(opts.days)} days`)
