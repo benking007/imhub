@@ -9,6 +9,7 @@ import { handleBuiltInCommand } from './commands/builtin.js'
 import { handleAgentCommand } from './commands/agent.js'
 import { handleAuditCommand } from './commands/audit.js'
 import { logInvocation } from './audit-log.js'
+import { circuitBreaker } from './circuit-breaker.js'
 
 /** Route context passed through the routing pipeline */
 export interface RouteContext {
@@ -96,6 +97,10 @@ export async function routeMessage(
         return `❌ Agent "${parsed.agent}" not found. Use /agents to see available agents.`
       }
 
+      if (circuitBreaker.isOpen(agent.name)) {
+        return `⛔ ${agent.name} is temporarily unavailable (too many consecutive failures). Try again in a few minutes, or use another agent.`
+      }
+
       if (!(await isAgentAvailableCached(agent.name))) {
         return formatAgentNotAvailableError(agent.name)
       }
@@ -123,6 +128,11 @@ export async function routeMessage(
       const agent = registry.findAgent(agentName)
       if (!agent) {
         return `❌ Agent "${agentName}" not configured.`
+      }
+
+      if (circuitBreaker.isOpen(agent.name)) {
+        const openAgents = circuitBreaker.listOpen().join(', ')
+        return `⛔ ${agent.name} is temporarily unavailable (circuit breaker open).\nCurrently blocked: ${openAgents || 'none'}\n\nTry /agents to see available agents, or wait a few minutes.`
       }
 
       if (!(await isAgentAvailableCached(agent.name))) {
@@ -190,7 +200,7 @@ export async function callAgentWithHistory(
         responseLen: fullResponse.length,
       })
 
-      // Write audit record
+      // Write audit record + update circuit breaker
       logInvocation({
         traceId: ctx.traceId,
         userId: ctx.userId || 'unknown',
@@ -204,6 +214,12 @@ export async function callAgentWithHistory(
         success: !invocationError,
         error: invocationError,
       })
+
+      if (invocationError) {
+        circuitBreaker.recordFailure(agent!.name)
+      } else {
+        circuitBreaker.recordSuccess(agent!.name)
+      }
     }
   })()
 }
