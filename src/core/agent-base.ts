@@ -54,6 +54,13 @@ export abstract class AgentBase implements AgentAdapter {
     })
   }
 
+  /** Lightweight health probe (same as isAvailable for CLI agents). */
+  async healthCheck(): Promise<{ ok: boolean; latencyMs?: number }> {
+    const start = Date.now()
+    const ok = await this.isAvailable()
+    return { ok, latencyMs: Date.now() - start }
+  }
+
   async *sendPrompt(_sessionId: string, prompt: string, history?: ChatMessage[]): AsyncGenerator<string> {
     rootLogger.info({ component: `agent.${this.name}`, agent: this.name, historyLen: history?.length || 0 },
       `[${this.name}] sendPrompt`)

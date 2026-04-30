@@ -72,10 +72,9 @@ const AGENT_PACKAGES: Record<string, AgentInstallHint> = {
 }
 
 // ============================================
-// Agent availability cache
 // ============================================
-
-let agentCheckCache: AgentCheckResult | null = null
+// Agent availability cache (TTL-based)
+// ============================================
 
 // ============================================
 // Config helpers (extracted for reuse)
@@ -142,24 +141,24 @@ export function checkMessengerConfig(config: Config): OnboardingResult {
 }
 
 // ============================================
-// 2. checkAgentAvailability (ASYNC, CACHED)
+// 2. checkAgentAvailability (ASYNC, TTL-cached)
 // ============================================
+
+// Cache with TTL so agent install/uninstall is reflected within 2 minutes
+let agentCheckCache: { result: AgentCheckResult; timestamp: number } | null = null
+const AGENT_CHECK_CACHE_TTL = 2 * 60 * 1000 // 2 minutes
 
 /**
  * Check which agents are available.
- * MUST be called AFTER registry.loadBuiltInPlugins().
- * Result is cached for the session.
+ * Result is cached with a 2-minute TTL.
  */
 export async function checkAgentAvailability(): Promise<AgentCheckResult> {
-  // Return cached result if available
-  if (agentCheckCache) {
-    return agentCheckCache
+  if (agentCheckCache && Date.now() - agentCheckCache.timestamp < AGENT_CHECK_CACHE_TTL) {
+    return agentCheckCache.result
   }
-
   const agentNames = registry.listAgents()
   const available: string[] = []
   const missing: string[] = []
-
   for (const name of agentNames) {
     const agent = registry.findAgent(name)
     if (agent) {
@@ -175,15 +174,12 @@ export async function checkAgentAvailability(): Promise<AgentCheckResult> {
       }
     }
   }
-
   const result: AgentCheckResult = {
     available,
     missing,
     allMissing: available.length === 0,
   }
-
-  // Cache the result
-  agentCheckCache = result
+  agentCheckCache = { result, timestamp: Date.now() }
   return result
 }
 
