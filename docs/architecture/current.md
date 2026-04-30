@@ -1,64 +1,71 @@
-# 当前架构（v0.2.12）
+# im-hub 架构总览（v0.2.13）
 
-> 来自 code-review-2026-04-30.md 图 1
+> 基线 commit：`18f96fb`（CR 修复批后）
+> 配套文档：[`development.md`](../development.md) · [`extending.md`](../extending.md) · [`deployment.md`](../deployment.md)
+
+---
+
+## 一、系统形态
+
+im-hub 是一个**进程内多面体网关**：单个 Node.js 进程同时扮演 IM 接入端、Agent 调用方、HTTP/REST/SSE/WebSocket 服务端、定时调度器和审计存储。所有组件共享同一个 `~/.im-hub/` 数据目录与同一棵 pino logger 树。
 
 ```
-┌──── IM 端（事件驱动） ──────────────┐
-│ WeChat iLink (poll 1s)             │
-│ Telegram (grammy long-poll)        │
-│ Feishu (Lark SDK WS)               │
-│ Web Chat (WS)                      │
-└──────────────┬─────────────────────┘
-               │ MessengerAdapter.onMessage(ctx)
-               ▼
-         ┌──────────────────────────┐
-         │  cli.ts handleMessage     │   ← 150 行混合逻辑
-         │  → parseMessage (regex)   │
-         │  → routeMessage           │
-         └──────────────┬────────────┘
-                        ▼
-       ┌────── router.ts 1087 行 ─────────┐
-       │ parseMessage  ──┐                 │
-       │ tryInterpretADP │ (正则硬码 NLP) │
-       │ handleBuiltIn   │                 │
-       │ handleAgentCmd  │                 │
-       │ subtask switch  │                 │
-       │ /model /models  │                 │
-       │ /stats usage    │                 │
-       │ /ok /no /exec   │                 │
-       └─────────┬───────────────────────┘
-                 ▼
-      registry.findAgent(alias)     ← 静态 alias 查表，无智能
-                 ▼
-     ┌───────────┼──────────────────┐
-     ▼           ▼                  ▼
-  opencode    claude-code    ACP remote
-  (spawn)     (spawn)        (HTTP SSE)
-  ↕ 30min     ↕ 无 timeout   ↕ 5min
-  硬超时      无 abort       有 abort
-  streaming   buffered       streaming
-  session id  无             sessionId 未用
+                         ┌─── 外部触发 ───┐
+                         │ cron 30s tick │
+                         │ webhook → /api/notify
+                         │ REST → /api/invoke
+                         │ ACP /tasks (sync/SSE)
+                         └────────┬───────┘
+  ┌─ IM 入口 ─────────────────────┼─────────────────────────┐
+  │ WeChat iLink (1s long-poll + 60s heartbeat)             │
+  │ Telegram (grammy long-poll)                              │
+  │ Feishu (Lark SDK WebSocket)                              │
+  │ Web Chat (browser WS, /tasks /settings 同源)             │
+  └────────────────────────────────┬─────────────────────────┘
+                                   │ MessageContext
+                                   ▼
+              ┌── Pre-route gates ─────────────────┐
+              │ workspace.resolve(userId)          │
+              │ rateLimiter.allow(userKey)         │
+              │ traceId 生成 + pino child logger    │
+              └────────────────┬───────────────────┘
+                               ▼
+              ┌── parseMessage + Intent ───────────┐
+              │ /<cmd>          → builtin 子命令   │
+              │ /<agent>        → explicit 切换    │
+              │ default         → classifyIntent   │
+              │   ├ topic regex (CJK + ASCII)      │
+              │   ├ keyword profile               │
+              │   ├ sticky session bias           │
+              │   └ LLM judge (opt-in 兜底)        │
+              └────────────────┬───────────────────┘
+                               ▼
+              ┌── Agent invocation ────────────────┐
+              │ workspace whitelist + circuit       │
+              │ breaker + isAvailable cache        │
+              │ AgentBase.sendPrompt → spawnStream │
+              │  (LineBuffer · 真流式 · abort/timeout)
+              └────────────────┬───────────────────┘
+                ┌──────┬───────┼────────┬─────────┐
+                ▼      ▼       ▼        ▼         ▼
+            opencode claude  codex   copilot  ACP remote
+                       │             │
+                       ▼             ▼
+                 ┌─ Job Board ─┐    持久化任务（SQLite）
+                 │ schedules → cron 自动 runJob
+                 └─────────────┘
+                       │
+                       ▼
+   ┌─ Cross-cutting ───────────────────────────────────┐
+   │ audit-log (SQLite, 30 天保留)                     │
+   │ metrics  (Prom text via /api/metrics)             │
+   │ session  (~/.im-hub/sessions/, JSONL append)      │
+   │ pino     (traceId 全链路, JSON in production)     │
+   └───────────────────────────────────────────────────┘
 ```
 
-### 关键流程
+整个进程**单实例**：没有外部 Redis/MQ 依赖。SQLite 三件套（`audit.db` / `jobs.db` / `schedules.db`）+ session 文件树就是全部的持久化。
 
-1. **消息接入**：各 Messenger plugin 以各自协议接收消息（WeChat iLink HTTP poll、Telegram grammy long-poll、Feishu Lark SDK WS、Web Chat WS），统一转换为 `MessageContext { message, platform, channelId }`，调用 `onMessage` 注册的回调。
+---
 
-2. **命令解析**：`parseMessage()` 按 `/` 前缀分词，匹配内置命令（status/help/new/sessions/approve/ok/no/exec/list/model/models/think/stats/task/tasks/check/cancel/switch/collect）→ Agent 别名 → agent 内置命令 → 错误。无 `/` 前缀的走 default 路径。
-
-3. **路由决策**：
-   - `command` 类型 → 内置命令处理
-   - `agent` 类型 → 切换会话 agent + 调用 agent
-   - `agentCommand` 类型 → 当前 agent 执行 `/test /review /commit push diff shell bug explain`
-   - `default` 类型 → ADP 意图检测（有 pending 时）→ subtask 已激活时路由到子会话 → 否则用当前/默认 agent
-
-4. **Agent 调用**：`callAgentWithHistory()` 构造上下文 prompt，调用 `agent.sendPrompt()`（async generator），收集文本 → 存储到 session → 返回流给 messenger。
-
-### 当前缺失
-
-- ❌ Observability（logs / metrics / trace / audit）
-- ❌ Auth & RBAC & multi-tenant
-- ❌ Rate limit / quota / budget
-- ❌ Circuit breaker / health / fallback cascade
-- ❌ Intent routing（目前全靠用户 /alias）
-- ❌ Outgoing gateway（别的系统 → im-hub → IM）
+（下一批：模块清单 + 调用契约）
