@@ -47,7 +47,7 @@
 
 ### 1.3 基础设施
 
-- [ ] Config schema 校验（zod）：启动时校验 config.json 结构，防止格式错导致运行时崩溃
+- [x] Config schema 校验（zod）：启动时校验 config.json 结构，防止格式错导致运行时崩溃
 - [ ] AgentBase 抽象：统一生命周期、signal、timeout、stream、usage、health
 - [ ] Router 拆分：命令分离到 `commands/*.ts`
 - [ ] Agent health 定期探活（替代永久缓存）
