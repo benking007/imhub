@@ -37,6 +37,10 @@ export type ParsedMessage =
   | { type: 'workspaces'; args: string }
   | { type: 'schedule'; args: string }
   | { type: 'job'; args: string }
+  | { type: 'model'; args: string }
+  | { type: 'think'; args: string }
+  | { type: 'stats'; args: string }
+  | { type: 'sessions'; args: string }
   | { type: 'error'; prompt: string; error: string }
 
 /**
@@ -68,9 +72,12 @@ export interface Session {
   lastActivity: Date
   ttl: number
   messages: ChatMessage[]
+  /** Current model (provider/model format) */
+  model?: string
+  /** Thinking depth variant */
+  variant?: string
   /** Active subtask id for /switch routing */
   activeSubtaskId?: number | null
-  /** Subtask metadata array */
   subtasks?: SubtaskMeta[]
   subtaskCounter?: number
 }
@@ -119,7 +126,7 @@ export interface MessengerAdapter {
 export interface AgentAdapter {
   readonly name: string
   readonly aliases: string[]
-  sendPrompt(sessionId: string, prompt: string, history?: ChatMessage[]): AsyncGenerator<string>
+  sendPrompt(sessionId: string, prompt: string, history?: ChatMessage[], opts?: { model?: string; variant?: string }): AsyncGenerator<string>
   isAvailable(): Promise<boolean>
 }
 

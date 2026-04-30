@@ -29,5 +29,5 @@ export async function handleAgentCommand(
   const session = await sessionManager.getOrCreateSession(
     ctx.platform, ctx.channelId, ctx.threadId, agent.name
   )
-  return callAgentWithHistory(agent, session.id, fullPrompt, session.messages, ctx)
+  return callAgentWithHistory(agent, session.id, fullPrompt, session.messages, ctx, session.model, session.variant)
 }

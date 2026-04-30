@@ -191,13 +191,13 @@ class CopilotAdapter extends AgentBase {
 
   // Override sendPrompt to short-circuit when not installed — gives a
   // friendlier message than spawnStream would after spawn failure.
-  async *sendPrompt(sessionId: string, prompt: string, history?: import('../../../core/types.js').ChatMessage[]): AsyncGenerator<string> {
+  async *sendPrompt(sessionId: string, prompt: string, history?: import('../../../core/types.js').ChatMessage[], _opts?: { model?: string; variant?: string }): AsyncGenerator<string> {
     if (!(await this.isAvailable())) {
       yield this.notAvailableMessage()
       return
     }
     rootLogger.info({ component: `agent.${this.name}`, agent: this.name, install: this.resolvedInstall?.type }, '[copilot] sendPrompt')
-    yield* super.sendPrompt(sessionId, prompt, history)
+    yield* super.sendPrompt(sessionId, prompt, history, _opts)
   }
 }
 

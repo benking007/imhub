@@ -27,7 +27,7 @@ export class ACPAdapter implements AgentAdapter {
     return this.client.healthCheck()
   }
 
-  async *sendPrompt(sessionId: string, prompt: string, history?: ChatMessage[]): AsyncGenerator<string> {
+  async *sendPrompt(sessionId: string, prompt: string, history?: ChatMessage[], _opts?: { model?: string; variant?: string }): AsyncGenerator<string> {
     // Try streaming first, fall back to sync.
     // NOTE: Fallback creates a new task; if the streaming task was partially
     // processed, the agent may repeat work. Acceptable for v1.

@@ -102,8 +102,11 @@ export abstract class AgentBase implements AgentAdapter {
   /** Binary name to check for isAvailable */
   protected get commandName(): string { return this.name }
 
-  /** Build CLI args array for a given prompt. */
+  /** Build CLI args array for a given prompt. Override to add model/variant flags. */
   protected abstract buildArgs(prompt: string): string[]
+
+  /** Current opts set by sendPrompt — subclasses may read in buildArgs. */
+  protected currentOpts: { model?: string; variant?: string } = {}
 
   /** Extract text content from a JSONL event object. */
   protected abstract extractText(event: unknown): string
@@ -138,10 +141,10 @@ export abstract class AgentBase implements AgentAdapter {
    * arrives; on non-zero exit, yields the friendly error tail (if any) and
    * returns.
    */
-  async *sendPrompt(_sessionId: string, prompt: string, history?: ChatMessage[]): AsyncGenerator<string> {
+  async *sendPrompt(_sessionId: string, prompt: string, history?: ChatMessage[], opts?: { model?: string; variant?: string }): AsyncGenerator<string> {
     rootLogger.info({ component: `agent.${this.name}`, agent: this.name, historyLen: history?.length || 0 },
       `[${this.name}] sendPrompt`)
-
+    this.currentOpts = opts || {}
     const contextualPrompt = this.buildContextualPrompt(prompt, history)
     yield* this.spawnStream(contextualPrompt)
   }

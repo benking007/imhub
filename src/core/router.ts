@@ -10,6 +10,10 @@ import { handleAgentCommand } from './commands/agent.js'
 import { handleAuditCommand } from './commands/audit.js'
 import { handleRouterCommand } from './commands/router.js'
 import { handleJobCommand } from './commands/job.js'
+import { handleModelCommand } from './commands/model.js'
+import { handleThinkCommand } from './commands/think.js'
+import { handleStatsCommand } from './commands/stats.js'
+import { handleSessionsCommand } from './commands/sessions.js'
 import { handleWorkspacesCommand } from './commands/workspaces.js'
 import { handleScheduleCommand } from './commands/schedule.js'
 import { logInvocation } from './audit-log.js'
@@ -91,6 +95,12 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'switch') return { type: 'job', args: `switch ${rest}` }
   if (cmd === 'collect') return { type: 'job', args: `collect ${rest}` }
 
+  // Model / think / stats / sessions commands
+  if (cmd === 'model' || cmd === 'models') return { type: 'model', args: rest }
+  if (cmd === 'think') return { type: 'think', args: rest }
+  if (cmd === 'stats' || cmd === 'usage' || cmd === 'cost') return { type: 'stats', args: rest }
+  if (cmd === 'sessions') return { type: 'sessions', args: rest }
+
   // Check if it's an agent alias (registered agents take priority over generic commands)
   const agent = registry.findAgent(cmd)
   if (agent) {
@@ -142,6 +152,22 @@ export async function routeMessage(
       return handleJobCommand(parsed.args, ctx)
     }
 
+    case 'model': {
+      return handleModelCommand(parsed.args, ctx)
+    }
+
+    case 'think': {
+      return handleThinkCommand(parsed.args, ctx)
+    }
+
+    case 'stats': {
+      return handleStatsCommand(parsed.args, ctx)
+    }
+
+    case 'sessions': {
+      return handleSessionsCommand(parsed.args, ctx)
+    }
+
     case 'agent': {
       const agent = registry.findAgent(parsed.agent)
       if (!agent) {
@@ -184,7 +210,7 @@ export async function routeMessage(
         ctx.platform, ctx.channelId, ctx.threadId, agent.name
       )
       ctx.intent = 'explicit'
-      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx)
+      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx, session.model, session.variant)
     }
 
     case 'error': {
@@ -226,7 +252,7 @@ export async function routeMessage(
         await sessionManager.addMessage(ctx.platform, ctx.channelId, `${ctx.threadId}:sub:${tid}`, {
           role: 'user', content: parsed.prompt, timestamp: new Date()
         })
-        return callAgentWithHistory(tAgent, subSession.id, parsed.prompt, subSession.messages, ctx)
+        return callAgentWithHistory(tAgent, subSession.id, parsed.prompt, subSession.messages, ctx, subSession.model, subSession.variant)
       }
 
       // Use intent classifier to pick best agent
@@ -300,7 +326,7 @@ export async function routeMessage(
       const session = await sessionManager.getOrCreateSession(
         ctx.platform, ctx.channelId, ctx.threadId, agentName
       )
-      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx)
+      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx, session.model, session.variant)
     }
   }
 }
@@ -314,7 +340,9 @@ export async function callAgentWithHistory(
   sessionId: string,
   prompt: string,
   history: ChatMessage[],
-  ctx: RouteContext
+  ctx: RouteContext,
+  model?: string,
+  variant?: string
 ): Promise<AsyncGenerator<string>> {
   await sessionManager.addMessage(ctx.platform, ctx.channelId, ctx.threadId, {
     role: 'user',
@@ -325,7 +353,7 @@ export async function callAgentWithHistory(
   const startTime = Date.now()
   ctx.logger.info({ event: 'agent.invoke.start', agent: agent!.name, promptLen: prompt.length, historyLen: history.length })
 
-  const generator = agent!.sendPrompt(sessionId, prompt, history)
+  const generator = agent!.sendPrompt(sessionId, prompt, history, { model, variant })
 
   return (async function* (): AsyncGenerator<string> {
     let fullResponse = ''
