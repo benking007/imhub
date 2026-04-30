@@ -5,6 +5,8 @@ import type { Logger } from 'pino'
 import { registry } from './registry.js'
 import { sessionManager } from './session.js'
 import { isAgentAvailableCached, formatAgentNotAvailableError } from './onboarding.js'
+import { handleBuiltInCommand } from './commands/builtin.js'
+import { handleAgentCommand } from './commands/agent.js'
 
 /** Route context passed through the routing pipeline */
 export interface RouteContext {
@@ -66,7 +68,6 @@ export function parseMessage(text: string): ParsedMessage {
 
 /**
  * Route a parsed message to the appropriate handler
- * Now supports async generator responses from agents
  */
 export async function routeMessage(
   parsed: ParsedMessage,
@@ -87,25 +88,18 @@ export async function routeMessage(
         return `❌ Agent "${parsed.agent}" not found. Use /agents to see available agents.`
       }
 
-      // Check if agent is available at runtime
       if (!(await isAgentAvailableCached(agent.name))) {
         return formatAgentNotAvailableError(agent.name)
       }
 
-      // Always switch the session agent (even without prompt)
       await sessionManager.switchAgent(ctx.platform, ctx.channelId, ctx.threadId, agent.name)
 
-      // If no prompt, just confirm switch
       if (!parsed.prompt) {
         return `✅ Switched to ${agent.name}`
       }
 
-      // Get session and call agent with history
       const session = await sessionManager.getOrCreateSession(
-        ctx.platform,
-        ctx.channelId,
-        ctx.threadId,
-        agent.name
+        ctx.platform, ctx.channelId, ctx.threadId, agent.name
       )
       return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx)
     }
@@ -115,7 +109,6 @@ export async function routeMessage(
     }
 
     case 'default': {
-      // Try to get existing session to use its agent, otherwise fall back to default
       const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
       const agentName = existingSession?.agent || ctx.defaultAgent
 
@@ -124,22 +117,16 @@ export async function routeMessage(
         return `❌ Agent "${agentName}" not configured.`
       }
 
-      // Check if agent is available at runtime
       if (!(await isAgentAvailableCached(agent.name))) {
         return formatAgentNotAvailableError(agent.name)
       }
 
-      // Empty prompt → just acknowledge
       if (!parsed.prompt) {
         return '💬 Send a message to chat with the agent.'
       }
 
-      // Get or create session, then call agent with history
       const session = await sessionManager.getOrCreateSession(
-        ctx.platform,
-        ctx.channelId,
-        ctx.threadId,
-        agentName
+        ctx.platform, ctx.channelId, ctx.threadId, agentName
       )
       return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx)
     }
@@ -147,15 +134,16 @@ export async function routeMessage(
 }
 
 /**
- * Call agent with conversation history and save messages
+ * Call agent with conversation history and save messages.
+ * Exported so command handlers (commands/*.ts) can reuse it.
  */
-async function callAgentWithHistory(
+export async function callAgentWithHistory(
   agent: ReturnType<typeof registry.findAgent>,
   sessionId: string,
   prompt: string,
   history: ChatMessage[],
   ctx: RouteContext
-): Promise<string | AsyncGenerator<string>> {
+): Promise<AsyncGenerator<string>> {
   await sessionManager.addMessage(ctx.platform, ctx.channelId, ctx.threadId, {
     role: 'user',
     content: prompt,
@@ -191,62 +179,4 @@ async function callAgentWithHistory(
       })
     }
   })()
-}
-
-async function handleBuiltInCommand(
-  command: 'start' | 'status' | 'help' | 'agents' | 'new',
-  _ctx: RouteContext
-): Promise<string> {
-  switch (command) {
-    case 'start':
-      return `👋 Welcome to IM Hub!\n\nI'm your AI assistant hub. Send me a message and I'll route it to the right AI agent.\n\nUse /help to see available commands.\nUse /agents to list available AI agents.`
-
-    case 'status':
-      return `📊 IM hub Status\n\nPlatform: Connected\nAgent: Ready\n\nSend a message to start!`
-
-    case 'help':
-      return `📖 IM hub Commands\n\nBuilt-in Commands:\n/agents - List available agents\n/new - Start a new conversation (clear history)\n/status - Show connection status\n/<agent> <prompt> - Switch to agent and send prompt\n\nAgent Commands:\n/test - Run tests\n/review - Code review\n/commit - Commit changes\n/push - Push to remote\n/diff - Show changes\n/shell - Execute shell commands\n/bug - Find and fix bugs\n/explain - Explain code\n\nExample: /claude explain this code`
-
-    case 'agents':
-      const agents = registry.listAgents()
-      if (agents.length === 0) {
-        return '⚠️ No agents registered yet.'
-      }
-      return `🤖 Available Agents\n\n${agents.map(a => `• ${a}`).join('\n')}\n\nUse /<agent> to switch.`
-
-    case 'new':
-      const session = await sessionManager.resetConversation(_ctx.platform, _ctx.channelId, _ctx.threadId)
-      if (session) {
-        return `🆕 New conversation started with ${session.agent}.\n\nPrevious context has been cleared.`
-      }
-      return `🆕 Ready to start a new conversation.\n\nSend a message to begin.`
-  }
-}
-
-async function handleAgentCommand(
-  command: string,
-  prompt: string,
-  ctx: RouteContext
-): Promise<string | AsyncGenerator<string>> {
-  const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
-  const agentName = existingSession?.agent || ctx.defaultAgent
-
-  const agent = registry.findAgent(agentName)
-  if (!agent) {
-    return `❌ Agent "${agentName}" not found. Use /agents to see available agents.`
-  }
-
-  if (!(await isAgentAvailableCached(agent.name))) {
-    return formatAgentNotAvailableError(agent.name)
-  }
-
-  const fullPrompt = `/${command} ${prompt}`.trim()
-
-  const session = await sessionManager.getOrCreateSession(
-    ctx.platform,
-    ctx.channelId,
-    ctx.threadId,
-    agent.name
-  )
-  return callAgentWithHistory(agent, session.id, fullPrompt, session.messages, ctx)
 }
