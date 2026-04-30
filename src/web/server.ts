@@ -99,6 +99,9 @@ export async function startWebServer(options: {
     if (url.pathname === '/api/agents/acp/test' && req.method === 'POST') {
       return handleAcpTest(req, res)
     }
+    if (url.pathname === '/api/agents/acp/discover' && req.method === 'POST') {
+      return handleAcpDiscover(req, res)
+    }
     if (url.pathname === '/api/workspaces' && req.method === 'GET') {
       return handleListWorkspaces(req, res)
     }
@@ -437,6 +440,29 @@ async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     sendJson(res, 500, { ok: false, error: msg })
+  }
+}
+
+async function handleAcpDiscover(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req, res)
+    const { baseUrl, register } = JSON.parse(body) as { baseUrl?: string; register?: boolean }
+    if (!baseUrl) {
+      sendJson(res, 400, { error: 'Missing baseUrl' })
+      return
+    }
+    const { discoverAgents } = await import('../plugins/agents/acp/discovery.js')
+    const result = await discoverAgents(baseUrl)
+    if (register) {
+      await registry.loadACPAgents(result.agents)
+    }
+    sendJson(res, 200, { ok: true, baseUrl: result.baseUrl, agents: result.agents })
+  } catch (err) {
+    const e = err as Error & { statusCode?: number; handled?: boolean }
+    if (e?.handled) return
+    const status = e?.statusCode || 500
+    const msg = e instanceof Error ? e.message : String(err)
+    if (!res.headersSent) sendJson(res, status, { ok: false, error: msg })
   }
 }
 

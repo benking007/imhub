@@ -31,6 +31,8 @@ export const configSchema = z.object({
   telegram: telegramSchema.optional(),
   feishu: feishuSchema.optional(),
   acpAgents: z.array(acpAgentSchema).optional(),
+  /** Base URLs to probe for `.well-known/acp` at startup. */
+  acpDiscoveryUrls: z.array(z.string().url()).optional(),
   webPort: z.number().int().positive().optional(),
   acpPort: z.number().int().positive().optional(),
   workspaces: z.array(z.object({

@@ -87,6 +87,12 @@ program
       await registry.loadACPAgents(config.acpAgents)
     }
 
+    // Discover ACP agents via .well-known/acp on configured base URLs
+    const discoveryUrls = (config as { acpDiscoveryUrls?: string[] }).acpDiscoveryUrls
+    if (discoveryUrls?.length) {
+      await registry.loadDiscoveredACPAgents(discoveryUrls)
+    }
+
     // Start the scheduler (runs cron-due schedules every 30s)
     const { startScheduler } = await import('./core/schedule.js')
     startScheduler()

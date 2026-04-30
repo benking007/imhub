@@ -97,6 +97,24 @@ class PluginRegistry {
     }
   }
 
+  /**
+   * Discover ACP agents via `.well-known/acp` on each base URL, then
+   * load every advertised agent through loadACPAgents(). Failures on
+   * individual URLs are logged but don't fail the batch.
+   */
+  async loadDiscoveredACPAgents(baseUrls: string[]): Promise<number> {
+    if (!baseUrls.length) return 0
+    const { discoverMany } = await import('../plugins/agents/acp/discovery.js')
+    const results = await discoverMany(baseUrls)
+    const flat: ACPAgentConfig[] = []
+    for (const r of results) flat.push(...r.agents)
+    if (flat.length === 0) return 0
+    await this.loadACPAgents(flat)
+    log.info({ baseUrls: baseUrls.length, agents: flat.length },
+      'ACP discovery complete')
+    return flat.length
+  }
+
   async loadBuiltInPlugins(): Promise<void> {
     // Load built-in messengers
     const { ilinkWeChatAdapter } = await import('../plugins/messengers/wechat/ilink-adapter.js')

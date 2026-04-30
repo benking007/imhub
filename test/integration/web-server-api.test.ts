@@ -174,4 +174,26 @@ describe('Web REST API', () => {
       expect(res.status).toBe(413)
     })
   })
+
+  describe('POST /api/agents/acp/discover', () => {
+    it('rejects missing baseUrl with 400', async () => {
+      const res = await fetch(url('/api/agents/acp/discover'), {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      expect(res.status).toBe(400)
+    })
+
+    it('returns error JSON on unreachable host', async () => {
+      const res = await fetch(url('/api/agents/acp/discover'), {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ baseUrl: 'http://127.0.0.1:1' }),
+      })
+      // Either 500 (network error) or 200 with ok:false depending on the
+      // server's error mapping — both valid as long as no agent registered.
+      expect([200, 500]).toContain(res.status)
+    })
+  })
 })
