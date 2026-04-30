@@ -95,8 +95,9 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'switch') return { type: 'job', args: `switch ${rest}` }
   if (cmd === 'collect') return { type: 'job', args: `collect ${rest}` }
 
-  // Model / think / stats / sessions commands
-  if (cmd === 'model' || cmd === 'models') return { type: 'model', args: rest }
+    // Model / think / stats / sessions commands
+    if (cmd === 'models') return { type: 'model', args: rest ? `list ${rest}` : 'list' }
+    if (cmd === 'model' || cmd === 'mode') return { type: 'model', args: rest }
   if (cmd === 'think') return { type: 'think', args: rest }
   if (cmd === 'stats' || cmd === 'usage' || cmd === 'cost') return { type: 'stats', args: rest }
   if (cmd === 'sessions') return { type: 'sessions', args: rest }

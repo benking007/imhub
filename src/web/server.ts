@@ -200,10 +200,10 @@ export async function startWebServer(options: {
     })
   })
 
-  // Start listening (loopback only by default)
+  // Start listening on all interfaces
   await new Promise<void>((resolve, reject) => {
     httpServer.on('error', reject)
-    httpServer.listen(port, '127.0.0.1', () => resolve())
+    httpServer.listen(port, '0.0.0.0', () => resolve())
   })
 
   webLog.info({ port }, `Chat UI available at http://localhost:${port}`)

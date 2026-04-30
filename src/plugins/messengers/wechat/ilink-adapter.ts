@@ -14,7 +14,7 @@ const log = rootLogger.child({ component: 'wechat-ilink' })
 
 const CREDENTIALS_FILE = join(homedir(), '.im-hub', 'wechat-credentials.json')
 const POLL_TIMEOUT = 30000 // 30 seconds
-const CONTEXT_TOKEN_TTL = 5 * 60 * 1000 // 5 minutes
+const CONTEXT_TOKEN_TTL = 30 * 60 * 1000 // 30 minutes
 
 const PROCESSED_MESSAGES_TTL = 60 * 1000 // 1 minute
 
@@ -219,44 +219,105 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
 
   private async pollLoop(): Promise<void> {
     log.info('Polling started')
+    let consecutiveFailures = 0
+    let lastHeartbeatTime = Date.now()
+    const HEARTBEAT_INTERVAL_MS = 60 * 1000 // 60 seconds
+
     while (this.isRunning) {
       try {
         const response = await this.client.getUpdates(this.pollState.getUpdatesBuf)
+
+        // Success — reset failure counter
+        consecutiveFailures = 0
 
         if (response.msgs?.length) {
           log.debug({ count: response.msgs.length }, 'Received messages')
         }
 
-        // Check for success (ret === 0 or undefined)
         const isSuccess = response.ret === 0 || response.ret === undefined
         if (isSuccess) {
-          // Update cursor
           this.pollState.getUpdatesBuf = response.get_updates_buf
 
           if (response.msgs) {
             for (const msg of response.msgs) {
-              log.debug({ messageId: msg.message_id, type: msg.message_type }, 'Processing message')
-              await this.handleIncomingMessage(msg)
+              this.handleIncomingMessage(msg).catch(err =>
+                log.error({ err: err instanceof Error ? err.message : String(err) }, 'Message handler error')
+              )
             }
           }
         } else if (response.ret === ILINK_ERRORS.SESSION_EXPIRED) {
-          log.error('WeChat session expired. Please re-login.')
-          this.isRunning = false
-          break
+          log.warn('WeChat session expired, attempting recovery...')
+          const recovered = await this.tryRefreshSession()
+          if (!recovered) {
+            log.error('WeChat session expired. Token refresh failed — polling stopped.')
+            this.isRunning = false
+            break
+          }
+          log.info('Token refreshed successfully, resuming polling')
         } else {
-          log.warn({ ret: response.ret }, 'Unexpected response')
+          log.warn({ ret: response.ret }, 'Unexpected getUpdates response code')
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
-        log.error({ err: errMsg }, 'Poll error')
+        consecutiveFailures++
+        log.error({ err: errMsg, consecutiveFailures }, 'Poll error')
+
+        // Exponential backoff on repeated failures (1s, 3s, 10s, 20s, 30s max)
+        if (consecutiveFailures > 1) {
+          const delay = Math.min(1000 * Math.pow(2, consecutiveFailures), 30000)
+          log.warn({ delayMs: delay }, `Backing off after ${consecutiveFailures} consecutive failures`)
+          await new Promise((resolve) => setTimeout(resolve, delay))
+          continue
+        }
       }
 
-      // Small delay between polls
+      // Periodic heartbeat: send getConfig to keep session alive & refresh tokens
+      if (Date.now() - lastHeartbeatTime >= HEARTBEAT_INTERVAL_MS) {
+        lastHeartbeatTime = Date.now()
+        this.sendHeartbeat().catch(err =>
+          log.warn({ err: err instanceof Error ? err.message : String(err) }, 'Heartbeat error')
+        )
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 1000))
     }
 
     this.pollState.isPolling = false
     log.info('Polling stopped')
+  }
+
+  /** Attempt to recover from SESSION_EXPIRED by re-fetching updates */
+  private async tryRefreshSession(): Promise<boolean> {
+    try {
+      // Try a fresh getUpdates call to see if the session can be recovered
+      const response = await this.client.getUpdates('')
+      if (response.ret === 0 || response.ret === undefined) {
+        this.pollState.getUpdatesBuf = response.get_updates_buf
+        if (response.msgs) {
+          for (const msg of response.msgs) {
+            if (msg.from_user_id && msg.context_token) {
+              this.setContextToken(msg.from_user_id, msg.context_token)
+            }
+          }
+        }
+        log.info('Session recovered after SESSION_EXPIRED')
+        return true
+      }
+      return false
+    } catch {
+      return false
+    }
+  }
+
+  /** Periodic keep-alive to prevent session timeouts */
+  private async sendHeartbeat(): Promise<void> {
+    if (!this.client.hasCredentials()) return
+    try {
+      await this.client.getUpdates(this.pollState.getUpdatesBuf)
+      log.debug('Heartbeat sent successfully')
+    } catch {
+      // Non-fatal — session may still be valid
+    }
   }
 
   private async handleIncomingMessage(msg: WeixinMessage): Promise<void> {
