@@ -108,6 +108,12 @@ export async function startWebServer(options: {
     if (url.pathname === '/api/health' && req.method === 'GET') {
       return handleHealth(req, res)
     }
+    if (url.pathname === '/api/notify' && req.method === 'POST') {
+      return handleNotify(req, res)
+    }
+    if (url.pathname === '/api/invoke' && req.method === 'POST') {
+      return handleInvoke(req, res, options.defaultAgent)
+    }
 
     res.writeHead(404)
     res.end('Not found')
@@ -220,7 +226,7 @@ async function handleGetConfig(_req: IncomingMessage, res: ServerResponse): Prom
 
 async function handlePutConfig(req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
-    const body = await readBody(req)
+    const body = await readBody(req, res)
     const incoming = JSON.parse(body) as Record<string, unknown>
     const existing = await loadConfig()
 
@@ -315,6 +321,108 @@ async function handleMetrics(_req: IncomingMessage, res: ServerResponse, url: UR
   }
 }
 
+/**
+ * POST /api/notify  → push a message to an IM thread.
+ *
+ * Body: { platform, threadId, text, card? }
+ * Use case: external systems (CI / monitoring / cron) pushing notices
+ * back to a chat thread without going through the Agent layer.
+ */
+async function handleNotify(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req, res)
+    const { platform, threadId, text, card } = JSON.parse(body) as {
+      platform?: string; threadId?: string; text?: string; card?: unknown
+    }
+    if (!platform || !threadId || (!text && !card)) {
+      sendJson(res, 400, { error: 'Missing platform / threadId / (text|card)' })
+      return
+    }
+
+    // Map platform name to messenger plugin name.
+    const messengerName = platform === 'wechat' ? 'wechat-ilink' : platform
+    const messenger = registry.getMessenger(messengerName)
+    if (!messenger) {
+      sendJson(res, 404, { error: `Messenger "${platform}" not registered` })
+      return
+    }
+
+    const traceId = generateTraceId()
+    const log = createLogger({ traceId, platform, component: 'notify' })
+    log.info({ threadId, hasCard: !!card, textLen: text?.length || 0 }, 'notify in')
+
+    if (card && typeof messenger.sendCard === 'function') {
+      await messenger.sendCard(threadId, card)
+    } else if (text) {
+      await messenger.sendMessage(threadId, text)
+    } else {
+      sendJson(res, 400, { error: 'card requires sendCard support, otherwise text is required' })
+      return
+    }
+
+    sendJson(res, 200, { ok: true, traceId })
+  } catch (err) {
+    const e = err as Error & { statusCode?: number; handled?: boolean }
+    if (e?.handled) return
+    const status = e?.statusCode || 500
+    const msg = e instanceof Error ? e.message : String(err)
+    if (!res.headersSent) sendJson(res, status, { error: msg })
+  }
+}
+
+/**
+ * POST /api/invoke  → run an agent prompt as if it came from a user.
+ *
+ * Body: { prompt, agent?, userId?, platform? }
+ * Returns a JSON response with the full text (for streaming use the ACP
+ * server's POST /tasks?mode=stream instead).
+ */
+async function handleInvoke(req: IncomingMessage, res: ServerResponse, defaultAgent: string): Promise<void> {
+  try {
+    const body = await readBody(req, res)
+    const parsed = JSON.parse(body) as {
+      prompt?: string; agent?: string; userId?: string; platform?: string
+    }
+    if (!parsed.prompt) {
+      sendJson(res, 400, { error: 'Missing prompt' })
+      return
+    }
+    const agentName = parsed.agent || defaultAgent
+    const promptText = parsed.agent ? `/${parsed.agent} ${parsed.prompt}` : parsed.prompt
+
+    const traceId = generateTraceId()
+    const platform = parsed.platform || 'rest'
+    const log = createLogger({ traceId, platform, component: 'invoke' })
+    log.info({ agent: agentName, promptLen: parsed.prompt.length }, 'invoke in')
+
+    const routeCtx = {
+      threadId: `rest:${traceId}`,
+      channelId: 'rest',
+      platform,
+      defaultAgent: agentName,
+      traceId,
+      logger: log,
+      userId: parsed.userId || 'rest-caller',
+    }
+
+    const parsedMsg = parseMessage(promptText)
+    const result = await routeMessage(parsedMsg, routeCtx)
+    let fullText = ''
+    if (typeof result === 'string') {
+      fullText = result
+    } else {
+      for await (const chunk of result) fullText += chunk
+    }
+    sendJson(res, 200, { ok: true, traceId, output: { content: fullText } })
+  } catch (err) {
+    const e = err as Error & { statusCode?: number; handled?: boolean }
+    if (e?.handled) return
+    const status = e?.statusCode || 500
+    const msg = e instanceof Error ? e.message : String(err)
+    if (!res.headersSent) sendJson(res, status, { error: msg })
+  }
+}
+
 async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Quick check: agent availability snapshot. Already used by settings UI;
   // exposing it under /api/health gives ops a stable URL.
@@ -334,7 +442,7 @@ async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise
 
 async function handleAcpTest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
-    const body = await readBody(req)
+    const body = await readBody(req, res)
     const { endpoint, auth } = JSON.parse(body)
 
     // Dynamic import to avoid circular deps
@@ -381,12 +489,37 @@ function mask(value: string | undefined): string {
   return value.slice(0, 2) + '****' + value.slice(-2)
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+/** Hard cap on inbound JSON bodies for the Web REST API. */
+const MAX_API_BODY_BYTES = 1 * 1024 * 1024  // 1 MiB
+
+function readBody(req: IncomingMessage, res?: ServerResponse): Promise<string> {
   return new Promise((resolve, reject) => {
-    let body = ''
-    req.on('data', (chunk: Buffer) => { body += chunk.toString() })
-    req.on('end', () => resolve(body))
-    req.on('error', reject)
+    const chunks: Buffer[] = []
+    let total = 0
+    let aborted = false
+    req.on('data', (chunk: Buffer) => {
+      if (aborted) return
+      total += chunk.length
+      if (total > MAX_API_BODY_BYTES) {
+        aborted = true
+        if (res && !res.headersSent) {
+          sendJson(res, 413, { error: 'Request body too large' })
+        }
+        const err = new Error('Request body too large') as Error & { statusCode?: number; handled?: boolean }
+        err.statusCode = 413
+        err.handled = !!res
+        reject(err)
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      if (aborted) return
+      resolve(Buffer.concat(chunks).toString('utf-8'))
+    })
+    req.on('error', (err) => {
+      if (!aborted) reject(err)
+    })
   })
 }
 
