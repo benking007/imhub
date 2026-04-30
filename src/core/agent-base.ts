@@ -30,25 +30,62 @@ function resolveTimeout(envKey: string, fallback: number): number {
 
 /**
  * Buffer line splitter that respects UTF-8 multi-byte boundaries.
- * Pushes complete lines; pending partial line (no trailing newline) is held
- * until flush().
+ *
+ * Holds a single `partial` string of bytes seen so far without a newline
+ * boundary. push(chunk) returns any complete lines found in
+ * partial+chunk, and resets partial to the remainder.
+ *
+ * Implementation notes:
+ *   - Uses StringDecoder so a 3-byte CJK codepoint split across chunks
+ *     stays whole (no U+FFFD).
+ *   - Skips the partial+chunk concat when the chunk has no newline AND
+ *     partial is empty (the common case for tiny chunks).
+ *   - Walks via indexOf + slice instead of String.split so we avoid
+ *     allocating an intermediate array of every line just to pop the
+ *     last one back into partial.
  */
 class LineBuffer {
   private decoder = new StringDecoder('utf8')
   private partial = ''
 
   push(chunk: Buffer): string[] {
-    this.partial += this.decoder.write(chunk)
-    const lines = this.partial.split('\n')
-    this.partial = lines.pop() || ''
-    return lines
+    const decoded = this.decoder.write(chunk)
+    if (!decoded) return []
+
+    if (decoded.indexOf('\n') === -1) {
+      // No newline in this chunk — extend partial. V8 ropes strings, so
+      // the concat is amortized O(1) here.
+      this.partial += decoded
+      return []
+    }
+
+    const data = this.partial.length === 0 ? decoded : this.partial + decoded
+    const out: string[] = []
+    let start = 0
+    let nl: number
+    while ((nl = data.indexOf('\n', start)) !== -1) {
+      out.push(data.slice(start, nl))
+      start = nl + 1
+    }
+    this.partial = start < data.length ? data.slice(start) : ''
+    return out
   }
 
   flush(): string[] {
     const tail = this.decoder.end()
-    const all = (this.partial + tail).split('\n')
+    const data = this.partial.length === 0 ? tail : this.partial + tail
     this.partial = ''
-    return all.filter((l) => l.length > 0)
+    if (data.length === 0) return []
+
+    const out: string[] = []
+    let start = 0
+    let nl: number
+    while ((nl = data.indexOf('\n', start)) !== -1) {
+      if (nl > start) out.push(data.slice(start, nl))
+      start = nl + 1
+    }
+    if (start < data.length) out.push(data.slice(start))
+    return out
   }
 }
 

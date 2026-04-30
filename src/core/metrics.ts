@@ -29,12 +29,10 @@ class SlidingWindow {
     if (this.idx === 0) this.full = true
   }
 
-  /** Materialize the current sample set, sorted ascending. */
+  /** Copy the current sample set (unsorted). */
   snapshot(): number[] {
     const len = this.full ? this.buf.length : this.idx
-    const out = this.buf.slice(0, len)
-    out.sort((a, b) => a - b)
-    return out
+    return this.buf.slice(0, len)
   }
 
   size(): number {
@@ -42,10 +40,61 @@ class SlidingWindow {
   }
 }
 
-function quantile(sorted: number[], q: number): number {
-  if (sorted.length === 0) return 0
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(q * (sorted.length - 1))))
-  return sorted[idx]
+/**
+ * Hoare-style partition. Returns an index `p` such that everything in
+ * [lo, p] is ≤ pivot and everything in [p+1, hi] is ≥ pivot.
+ */
+function partition(arr: number[], lo: number, hi: number): number {
+  const pivot = arr[(lo + hi) >>> 1]
+  let i = lo - 1, j = hi + 1
+  while (true) {
+    do { i++ } while (arr[i] < pivot)
+    do { j-- } while (arr[j] > pivot)
+    if (i >= j) return j
+    const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp
+  }
+}
+
+/**
+ * In-place quickselect: after the call, arr[k] is the value that would
+ * be at index k in a fully-sorted array. Average O(n).
+ */
+function quickselect(arr: number[], k: number, lo: number, hi: number): void {
+  while (lo < hi) {
+    const p = partition(arr, lo, hi)
+    if (k <= p) hi = p
+    else lo = p + 1
+  }
+}
+
+/**
+ * Compute multiple quantiles in a single shared copy. Sorts the
+ * quantiles ascending, then runs quickselect with each successive
+ * `lo` bounded by the previous index — so we only re-partition the
+ * tail relevant to the higher quantile.
+ *
+ * For 3 quantiles on n=1024 this is ~3n comparisons vs n·log(n) ≈ 10n
+ * for a full sort.
+ */
+function multiQuantile(buf: number[], qs: number[]): number[] {
+  if (buf.length === 0) return qs.map(() => 0)
+  const arr = buf.slice()
+  const n = arr.length
+  const ordered = qs.map((q, i) => ({
+    q,
+    i,
+    idx: Math.min(n - 1, Math.max(0, Math.floor(q * (n - 1)))),
+  }))
+  ordered.sort((a, b) => a.idx - b.idx)
+
+  const out = new Array<number>(qs.length)
+  let lo = 0
+  for (const { i, idx } of ordered) {
+    quickselect(arr, idx, lo, n - 1)
+    out[i] = arr[idx]
+    lo = idx  // next quantile is at or after this one
+  }
+  return out
 }
 
 interface AgentBucket {
@@ -114,7 +163,8 @@ export function snapshot(): MetricsSnapshot {
   const now = Date.now()
   const agents: MetricsSnapshot['agents'] = []
   for (const [agent, b] of agentBuckets) {
-    const sorted = b.latency.snapshot()
+    const samples = b.latency.snapshot()
+    const [p50Ms, p95Ms, p99Ms] = multiQuantile(samples, [0.5, 0.95, 0.99])
     agents.push({
       agent,
       total: b.total,
@@ -122,10 +172,10 @@ export function snapshot(): MetricsSnapshot {
       failure: b.failure,
       successRate: b.total > 0 ? b.success / b.total : 0,
       costSum: b.costSum,
-      sampleCount: sorted.length,
-      p50Ms: quantile(sorted, 0.5),
-      p95Ms: quantile(sorted, 0.95),
-      p99Ms: quantile(sorted, 0.99),
+      sampleCount: samples.length,
+      p50Ms,
+      p95Ms,
+      p99Ms,
     })
   }
   agents.sort((a, b) => a.agent.localeCompare(b.agent))

@@ -81,4 +81,22 @@ describe('metrics', () => {
     expect(a.sampleCount).toBe(0)
     expect(a.total).toBe(1)  // counter still increments
   })
+
+  it('quantile via quickselect matches sort-based reference', () => {
+    // Stress with random durations to verify quickselect picks the same
+    // value the old sort-based path would have.
+    const samples: number[] = []
+    for (let i = 0; i < 500; i++) {
+      const v = Math.floor(Math.random() * 1_000_000)
+      samples.push(v)
+      recordInvocation({ agent: 'rand', intent: 'd', platform: 'p', durationMs: v, cost: 0, success: true })
+    }
+    const sorted = samples.slice().sort((a, b) => a - b)
+    const refIdx = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1)))]
+
+    const a = snapshot().agents.find((x) => x.agent === 'rand')!
+    expect(a.p50Ms).toBe(refIdx(0.5))
+    expect(a.p95Ms).toBe(refIdx(0.95))
+    expect(a.p99Ms).toBe(refIdx(0.99))
+  })
 })
