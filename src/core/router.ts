@@ -8,8 +8,10 @@ import { isAgentAvailableCached, formatAgentNotAvailableError } from './onboardi
 import { handleBuiltInCommand } from './commands/builtin.js'
 import { handleAgentCommand } from './commands/agent.js'
 import { handleAuditCommand } from './commands/audit.js'
+import { handleRouterCommand } from './commands/router.js'
 import { logInvocation } from './audit-log.js'
 import { circuitBreaker } from './circuit-breaker.js'
+import { classifyIntent } from './intent.js'
 
 /** Route context passed through the routing pipeline */
 export interface RouteContext {
@@ -55,6 +57,7 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'agents') return { type: 'command', command: 'agents' }
   if (cmd === 'new') return { type: 'command', command: 'new' }
   if (cmd === 'audit') return { type: 'audit', args: rest }
+  if (cmd === 'router') return { type: 'router', args: rest }
 
   // Check if it's an agent alias (registered agents take priority over generic commands)
   const agent = registry.findAgent(cmd)
@@ -91,6 +94,10 @@ export async function routeMessage(
       return handleAuditCommand(parsed.args, ctx)
     }
 
+    case 'router': {
+      return handleRouterCommand(parsed.args, ctx)
+    }
+
     case 'agent': {
       const agent = registry.findAgent(parsed.agent)
       if (!agent) {
@@ -123,7 +130,21 @@ export async function routeMessage(
 
     case 'default': {
       const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
-      const agentName = existingSession?.agent || ctx.defaultAgent
+
+      // Use intent classifier to pick best agent
+      const stickyAgent = existingSession?.agent
+      let agentName: string
+      let intent: string = 'fallback'
+
+      try {
+        const classification = classifyIntent(parsed.prompt, stickyAgent, ctx.logger)
+        agentName = classification.agent
+        intent = classification.triggeredBy
+        ctx.logger.info({ event: 'router.intent', agent: agentName, intent, score: classification.score, reason: classification.reason })
+      } catch {
+        agentName = stickyAgent || ctx.defaultAgent
+        ctx.logger.warn({ event: 'router.intent.failed', fallback: agentName })
+      }
 
       const agent = registry.findAgent(agentName)
       if (!agent) {
@@ -141,6 +162,11 @@ export async function routeMessage(
 
       if (!parsed.prompt) {
         return '💬 Send a message to chat with the agent.'
+      }
+
+      // Switch session agent if intent picked a different one
+      if (agentName !== stickyAgent) {
+        await sessionManager.switchAgent(ctx.platform, ctx.channelId, ctx.threadId, agentName)
       }
 
       const session = await sessionManager.getOrCreateSession(
