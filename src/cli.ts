@@ -12,6 +12,7 @@ import { crossSpawn, isMac, isWindows } from './utils/cross-platform.js'
 import type { MessageContext } from './core/types.js'
 import { generateTraceId, createLogger } from './core/logger.js'
 import { validateConfig } from './core/config-schema.js'
+import { workspaceRegistry } from './core/workspace.js'
 import {
   checkMessengerConfig,
   checkAgentAvailability,
@@ -67,6 +68,13 @@ program
       console.warn('   im-hub will continue with defaults for invalid fields.\n')
     }
     config = validation.ok ? validation.config as unknown as Config : config
+
+    // Initialize workspace registry
+    const rawConfig = config as Record<string, unknown>
+    const workspaces = rawConfig.workspaces as Array<Record<string, unknown>> | undefined
+    workspaceRegistry.load({ workspaces: workspaces as Array<{ id: string; name: string; agents: string[]; members?: string[]; rateLimit?: { rate: number; intervalSec: number; burst: number } }> })
+    const wsCount = workspaces?.length || 1
+    console.log(`Workspaces loaded: ${wsCount} workspace(s)`)
 
     // Initialize session manager
     await sessionManager.start()

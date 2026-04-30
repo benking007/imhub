@@ -32,6 +32,18 @@ export const configSchema = z.object({
   feishu: feishuSchema.optional(),
   acpAgents: z.array(acpAgentSchema).optional(),
   webPort: z.number().int().positive().optional(),
+  acpPort: z.number().int().positive().optional(),
+  workspaces: z.array(z.object({
+    id: z.string().min(1),
+    name: z.string().default(''),
+    agents: z.array(z.string()).default([]),
+    members: z.array(z.string()).optional(),
+    rateLimit: z.object({
+      rate: z.number().int().positive(),
+      intervalSec: z.number().int().positive(),
+      burst: z.number().int().positive(),
+    }).optional(),
+  })).optional(),
 }).passthrough()
 
 export type ValidatedConfig = z.infer<typeof configSchema>

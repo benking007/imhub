@@ -13,6 +13,7 @@ import { logInvocation } from './audit-log.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { classifyIntent } from './intent.js'
 import { userLimiter } from './rate-limiter.js'
+import { workspaceRegistry } from './workspace.js'
 
 /** Route context passed through the routing pipeline */
 export interface RouteContext {
@@ -162,6 +163,12 @@ export async function routeMessage(
       if (circuitBreaker.isOpen(agent.name)) {
         const openAgents = circuitBreaker.listOpen().join(', ')
         return `⛔ ${agent.name} is temporarily unavailable (circuit breaker open).\nCurrently blocked: ${openAgents || 'none'}\n\nTry /agents to see available agents, or wait a few minutes.`
+      }
+
+      // Workspace agent whitelist check
+      const ws = workspaceRegistry.resolve(ctx.userId || 'unknown')
+      if (!ws.hasAgent(agent.name)) {
+        return `🚫 Agent "${agent.name}" is not available in your workspace.\n\nTry /agents to see available agents.`
       }
 
       if (!(await isAgentAvailableCached(agent.name))) {
