@@ -11,6 +11,7 @@ import { parseMessage, routeMessage, type RouteContext } from './core/router.js'
 import { crossSpawn, isMac, isWindows } from './utils/cross-platform.js'
 import type { MessageContext } from './core/types.js'
 import { generateTraceId, createLogger } from './core/logger.js'
+import { validateConfig } from './core/config-schema.js'
 import {
   checkMessengerConfig,
   checkAgentAvailability,
@@ -54,6 +55,17 @@ program
 
     let config = await loadConfig()
     console.log(`Config loaded from ${CONFIG_FILE}`)
+
+    // Validate config schema
+    const validation = validateConfig(config)
+    if (!validation.ok) {
+      console.warn('⚠️  Config schema issues detected:')
+      for (const err of validation.errors) {
+        console.warn(`   - ${err}`)
+      }
+      console.warn('   im-hub will continue with defaults for invalid fields.\n')
+    }
+    config = validation.ok ? validation.config as unknown as Config : config
 
     // Initialize session manager
     await sessionManager.start()

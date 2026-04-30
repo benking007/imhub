@@ -11,6 +11,7 @@ import { parseMessage, routeMessage, type RouteContext } from '../core/router.js
 import { sessionManager } from '../core/session.js'
 import { registry } from '../core/registry.js'
 import { generateTraceId, createLogger } from '../core/logger.js'
+import { validateConfig } from '../core/config-schema.js'
 import {
   isAgentAvailableCached,
   loadConfig,
@@ -254,7 +255,13 @@ async function handlePutConfig(req: IncomingMessage, res: ServerResponse): Promi
       merged[key] = val
     }
 
-    await saveConfig(merged as Config)
+    const result = validateConfig(merged)
+    if (!result.ok) {
+      sendJson(res, 400, { error: 'Config validation failed', details: result.errors })
+      return
+    }
+
+    await saveConfig(result.config as unknown as Config)
     sendJson(res, 200, { ok: true })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
