@@ -22,20 +22,20 @@
 
 ### 1.1 P0 安全修复
 
-- [ ] P0-1 session 文件路径消毒（防路径注入）
-- [ ] P0-2 Web API 鉴权（随机 token + loopback-only + header 校验）
-- [ ] P0-3 Config PUT mask 回写修复
-- [ ] P0-4 opencode extractText 收紧（白名单 type）
-- [ ] P0-5 opencode timeout 可配置
-- [ ] P0-6/7 确认 src 中无 Teams/Slack/wechaty 死代码
+- [x] P0-1 session 文件路径消毒（防路径注入）
+- [x] P0-2 Web API 鉴权（随机 token + loopback-only + header 校验）
+- [x] P0-3 Config PUT mask 回写修复
+- [x] P0-4 opencode extractText 收紧（白名单 type）
+- [x] P0-5 opencode timeout 可配置
+- [x] P0-6/7 确认 src 中无 Teams/Slack/wechaty 死代码
 
 ### 1.2 结构化日志
 
-- [ ] 引入 pino + pino-pretty
-- [ ] traceId 贯穿 messenger → router → agent → reply
-- [ ] Agent invocation span（start/end/duration/cost/outcome）
-- [ ] 日志级别可配（LOG_LEVEL env）
-- [ ] 敏感字段脱敏（token、secret 不出现在日志）
+- [x] 引入 pino + pino-pretty
+- [x] traceId 贯穿 messenger → router → agent → reply
+- [x] Agent invocation span（start/end/duration/cost/outcome）
+- [x] 日志级别可配（LOG_LEVEL env）
+- [x] 敏感字段脱敏（token、secret 不出现在日志）
 
 ### 1.3 基础设施
 
