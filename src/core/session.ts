@@ -213,6 +213,58 @@ class SessionManager {
   }
 
   /**
+   * Persist `model` / `variant` / arbitrary patchable fields. Used by
+   * `/model`, `/think` etc so the change survives a restart between turns.
+   * Mutates the in-memory session in place AND writes metadata atomically.
+   */
+  async patchSession(
+    platform: string, channelId: string, threadId: string,
+    patch: Partial<Pick<Session, 'model' | 'variant' | 'agent'>>,
+  ): Promise<Session | undefined> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session) return undefined
+    if (patch.model !== undefined) session.model = patch.model || undefined
+    if (patch.variant !== undefined) session.variant = patch.variant || undefined
+    if (patch.agent !== undefined) session.agent = patch.agent
+    session.lastActivity = new Date()
+    this.sessions.set(key, session)
+    await this.saveSessionMeta(key, session)
+    return session
+  }
+
+  /**
+   * Increment the per-session usage roll-up after a successful agent
+   * invocation. Used by router.callAgentWithHistory to power /stats.
+   */
+  async recordUsage(
+    platform: string, channelId: string, threadId: string,
+    delta: { costUsd: number; promptChars: number; responseChars: number; durationMs: number },
+  ): Promise<void> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session) return
+    if (!session.usage) {
+      session.usage = {
+        turns: 0,
+        costUsd: 0,
+        promptChars: 0,
+        responseChars: 0,
+        durationMsTotal: 0,
+        startedAt: new Date().toISOString(),
+      }
+    }
+    session.usage.turns += 1
+    session.usage.costUsd += Number.isFinite(delta.costUsd) ? delta.costUsd : 0
+    session.usage.promptChars += Number.isFinite(delta.promptChars) ? delta.promptChars : 0
+    session.usage.responseChars += Number.isFinite(delta.responseChars) ? delta.responseChars : 0
+    session.usage.durationMsTotal += Number.isFinite(delta.durationMs) ? delta.durationMs : 0
+    session.lastActivity = new Date()
+    this.sessions.set(key, session)
+    await this.saveSessionMeta(key, session)
+  }
+
+  /**
    * Reset conversation history (keep session but clear messages)
    */
   async resetConversation(
@@ -378,6 +430,7 @@ class SessionManager {
         agent: session.agent,
         model: session.model,
         variant: session.variant,
+        usage: session.usage,
         createdAt: session.createdAt,
         lastActivity: session.lastActivity,
         ttl: session.ttl,
@@ -417,6 +470,7 @@ class SessionManager {
         agent: parsed.agent!,
         model: parsed.model,
         variant: parsed.variant,
+        usage: parsed.usage,
         createdAt: new Date(parsed.createdAt!),
         lastActivity: new Date(parsed.lastActivity!),
         ttl: parsed.ttl!,

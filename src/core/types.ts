@@ -76,10 +76,24 @@ export interface Session {
   model?: string
   /** Thinking depth variant */
   variant?: string
+  /** Per-session usage roll-up. Updated by callAgentWithHistory after every
+   *  successful agent invocation. Persisted with the session metadata so
+   *  /stats survives restart. */
+  usage?: SessionUsage
   /** Active subtask id for /switch routing */
   activeSubtaskId?: number | null
   subtasks?: SubtaskMeta[]
   subtaskCounter?: number
+}
+
+export interface SessionUsage {
+  turns: number
+  costUsd: number
+  promptChars: number
+  responseChars: number
+  durationMsTotal: number
+  /** ISO string of first invocation */
+  startedAt: string
 }
 
 /** Lightweight subtask metadata stored in parent session */

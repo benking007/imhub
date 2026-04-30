@@ -409,6 +409,13 @@ export async function callAgentWithHistory(
         circuitBreaker.recordFailure(agent!.name)
       } else {
         circuitBreaker.recordSuccess(agent!.name)
+        // Roll up into the session-level usage so /stats reflects reality.
+        await sessionManager.recordUsage(ctx.platform, ctx.channelId, ctx.threadId, {
+          costUsd: cost,
+          promptChars: prompt.length,
+          responseChars: fullResponse.length,
+          durationMs,
+        })
       }
     }
   })()

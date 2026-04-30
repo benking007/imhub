@@ -219,12 +219,17 @@ docker run -d \
 
 ## 五、端口与暴露
 
-| 端口 | 服务 | 默认绑定 | 是否要暴露 |
+| 端口 | 服务 | 默认绑定 | 暴露建议 |
 |---|---|---|---|
-| 3000 | Web 控制台 + REST API | `127.0.0.1` only | 仅本机。要对外用反向代理 + HTTPS |
+| 3000 | Web 控制台 + REST API | **`0.0.0.0`**（全网监听） | 公网部署时必须配防火墙 + HTTPS 反代 |
 | 9090 | ACP Server | `127.0.0.1` only | 仅 ACP 上游需要时 |
 
-> 两个端口都强制绑定回环。要让团队/外部访问，**必须**用 nginx/Caddy 做 HTTPS 代理（见下）。直接暴露 HTTP 等于把 web-token 放给中间路由。
+> ⚠️ **Web 控制台默认对所有网络接口开放**（v0.2.13 起），方便容器/虚拟机网络环境直接访问。生产部署到公网时**必须**：
+> 1. 用防火墙（云厂商安全组 / iptables / ufw）只允许已知来源 IP；
+> 2. 用 nginx/Caddy 做 HTTPS 反代终端用户访问，**不要直接 HTTP 暴露**（web-token 在 header 里明文传，HTTP 等于交给中间路由）；
+> 3. 定期轮换 token：`rm ~/.im-hub/web-token && systemctl restart im-hub`。
+>
+> 如果只在私网用，建议改回回环监听（修改 `~/.im-hub/config.json`，加 `"webHost": "127.0.0.1"`，或者直接修改源码 `src/web/server.ts:206`）。
 
 ### 5.1 nginx 反代示例
 

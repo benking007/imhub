@@ -249,7 +249,7 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
           log.warn('WeChat session expired, attempting recovery...')
           const recovered = await this.tryRefreshSession()
           if (!recovered) {
-            log.error('WeChat session expired. Token refresh failed — polling stopped.')
+            log.error('WeChat session expired. Token refresh failed after retries — polling stopped.')
             this.isRunning = false
             break
           }
@@ -262,16 +262,19 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
         consecutiveFailures++
         log.error({ err: errMsg, consecutiveFailures }, 'Poll error')
 
-        // Exponential backoff on repeated failures (1s, 3s, 10s, 20s, 30s max)
+        // Exponential backoff on consecutive failures.
+        //   1st failure: no extra wait, just the regular 1s tail sleep
+        //   2nd: 2s   3rd: 4s   4th: 8s   5th: 16s   6th+: 30s (capped)
         if (consecutiveFailures > 1) {
-          const delay = Math.min(1000 * Math.pow(2, consecutiveFailures), 30000)
+          const delay = Math.min(1000 * Math.pow(2, consecutiveFailures - 1), 30000)
           log.warn({ delayMs: delay }, `Backing off after ${consecutiveFailures} consecutive failures`)
           await new Promise((resolve) => setTimeout(resolve, delay))
           continue
         }
       }
 
-      // Periodic heartbeat: send getConfig to keep session alive & refresh tokens
+      // Periodic heartbeat: getconfig probe (no side effect on the
+      // long-poll cursor, so it's safe to run alongside the loop).
       if (Date.now() - lastHeartbeatTime >= HEARTBEAT_INTERVAL_MS) {
         lastHeartbeatTime = Date.now()
         this.sendHeartbeat().catch(err =>
@@ -286,37 +289,51 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
     log.info('Polling stopped')
   }
 
-  /** Attempt to recover from SESSION_EXPIRED by re-fetching updates */
+  /**
+   * Attempt to recover from SESSION_EXPIRED. Tries a fresh getUpdates
+   * up to 3 times with linear backoff so a single network blip during
+   * recovery doesn't tear down the whole adapter (W-3).
+   */
   private async tryRefreshSession(): Promise<boolean> {
-    try {
-      // Try a fresh getUpdates call to see if the session can be recovered
-      const response = await this.client.getUpdates('')
-      if (response.ret === 0 || response.ret === undefined) {
-        this.pollState.getUpdatesBuf = response.get_updates_buf
-        if (response.msgs) {
-          for (const msg of response.msgs) {
-            if (msg.from_user_id && msg.context_token) {
-              this.setContextToken(msg.from_user_id, msg.context_token)
+    const MAX_ATTEMPTS = 3
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const response = await this.client.getUpdates('')
+        if (response.ret === 0 || response.ret === undefined) {
+          this.pollState.getUpdatesBuf = response.get_updates_buf
+          if (response.msgs) {
+            for (const msg of response.msgs) {
+              if (msg.from_user_id && msg.context_token) {
+                this.setContextToken(msg.from_user_id, msg.context_token)
+              }
             }
           }
+          log.info({ attempt }, 'Session recovered after SESSION_EXPIRED')
+          return true
         }
-        log.info('Session recovered after SESSION_EXPIRED')
-        return true
+        log.warn({ attempt, ret: response.ret }, 'Session refresh attempt returned error')
+      } catch (err) {
+        log.warn({ attempt, err: err instanceof Error ? err.message : String(err) },
+          'Session refresh attempt threw')
       }
-      return false
-    } catch {
-      return false
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 5_000))  // 5s, 10s
+      }
     }
+    return false
   }
 
-  /** Periodic keep-alive to prevent session timeouts */
+  /**
+   * Periodic keep-alive: probe getconfig instead of getUpdates so we don't
+   * race the polling loop on the same long-poll cursor (W-1).
+   */
   private async sendHeartbeat(): Promise<void> {
     if (!this.client.hasCredentials()) return
-    try {
-      await this.client.getUpdates(this.pollState.getUpdatesBuf)
-      log.debug('Heartbeat sent successfully')
-    } catch {
-      // Non-fatal — session may still be valid
+    const ok = await this.client.pingConfig()
+    if (ok) {
+      log.debug('Heartbeat OK')
+    } else {
+      log.warn('Heartbeat failed (getconfig returned non-OK)')
     }
   }
 

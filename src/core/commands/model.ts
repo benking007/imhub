@@ -1,11 +1,21 @@
-// /model [name|#N] + /models [filter] — model switching & listing
+// /model [name|#N] + /models [filter|refresh] — model switching & listing
+//
+// Currently only the opencode adapter ships variants/models that the
+// router can switch between, so this command is opencode-scoped. When
+// the active agent isn't opencode we surface a friendly "not supported"
+// message instead of querying the wrong CLI.
 
 import { spawn } from 'child_process'
 import type { RouteContext } from '../router.js'
 import { sessionManager } from '../session.js'
 
+const SUPPORTED_AGENT = 'opencode'
+const MODEL_LIST_TTL_MS = 5 * 60 * 1000  // 5 minutes — picks up newly-added models
+
 function sessionKey(ctx: RouteContext): string {
-  return `${ctx.platform}:${ctx.channelId}:${ctx.userId || ctx.threadId}`
+  // Mirrors SessionManager's key shape so the cached numbered list lives
+  // alongside the actual session state (no userId mismatch in groups).
+  return `${ctx.platform}:${ctx.channelId}:${ctx.threadId}`
 }
 
 function parseModelArgs(args: string): { sub: string; rest: string } {
@@ -18,6 +28,19 @@ const sessionModelIndex = new Map<string, string[]>()
 
 export async function handleModelCommand(args: string, ctx: RouteContext): Promise<string> {
   const { sub, rest } = parseModelArgs(args)
+
+  // /model refresh — force re-query the underlying CLI (M-5)
+  if (sub === 'refresh') {
+    invalidateModelCache()
+    return '✅ 模型缓存已清空。下次 /models 将重新查询。'
+  }
+
+  // Determine which agent the active session is using; fall back to default
+  const session = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
+  const activeAgent = session?.agent || ctx.defaultAgent
+  if (activeAgent !== SUPPORTED_AGENT) {
+    return `ℹ️ \`/model\` 仅在 \`${SUPPORTED_AGENT}\` 下可用，当前 agent: \`${activeAgent}\`。\n\n切换到 opencode：/oc 或 /opencode`
+  }
 
   // /models or /models <filter> — list all models
   if (sub === 'list') {
@@ -48,7 +71,7 @@ async function handleModelList(filter: string, ctx: RouteContext): Promise<strin
   const session = await sessionManager.getOrCreateSession(ctx.platform, ctx.channelId, ctx.threadId, ctx.defaultAgent)
   const current = session?.model || defaultModel
 
-  // Build a flat indexed list for /model +N lookup
+  // Build a flat indexed list for /model #N lookup
   let idx = 1
   const flat: { num: number; full: string }[] = []
   const groups = new Map<string, { num: number; short: string; full: string }[]>()
@@ -62,7 +85,7 @@ async function handleModelList(filter: string, ctx: RouteContext): Promise<strin
     idx++
   }
 
-  // Cache indexed list for this session
+  // Cache indexed list keyed identically to SessionManager.
   sessionModelIndex.set(sessionKey(ctx), flat.map(f => f.full))
 
   let msg = `📋 模型列表 (${filtered.length})\n\n`
@@ -74,7 +97,7 @@ async function handleModelList(filter: string, ctx: RouteContext): Promise<strin
       msg += `  ${String(num).padStart(3, ' ')}. \`${short}\`${tag}\n`
     }
   }
-  msg += `\n当前: \`${current}\` ⭐\n/model <全名> 或 /model #序号 切换`
+  msg += `\n当前: \`${current}\` ⭐\n/model <全名> 或 /model #序号 切换\n/models refresh 强制刷新缓存`
   return msg
 }
 
@@ -100,8 +123,8 @@ async function handleModelSwitch(input: string, ctx: RouteContext): Promise<stri
       return `⚠️ 序号 ${num} 无效。可用范围: 1 - ${cached.length}\n\n先 /models 查看完整列表。`
     }
     const model = cached[num - 1]
-    const session = await sessionManager.getOrCreateSession(ctx.platform, ctx.channelId, ctx.threadId, ctx.defaultAgent)
-    session.model = model
+    await sessionManager.getOrCreateSession(ctx.platform, ctx.channelId, ctx.threadId, ctx.defaultAgent)
+    await sessionManager.patchSession(ctx.platform, ctx.channelId, ctx.threadId, { model })
     return `✅ 模型已切换: \`${model}\``
   }
 
@@ -116,23 +139,32 @@ async function handleModelSwitch(input: string, ctx: RouteContext): Promise<stri
     return `⚠️ 模型 "${input}" 不在列表中。\n\n先 /models 查看可用模型。`
   }
 
-  const session = await sessionManager.getOrCreateSession(ctx.platform, ctx.channelId, ctx.threadId, ctx.defaultAgent)
-  session.model = exactMatch || input
-  return `✅ 模型已切换: \`${exactMatch || input}\``
+  const resolved = exactMatch || input
+  await sessionManager.getOrCreateSession(ctx.platform, ctx.channelId, ctx.threadId, ctx.defaultAgent)
+  await sessionManager.patchSession(ctx.platform, ctx.channelId, ctx.threadId, { model: resolved })
+  return `✅ 模型已切换: \`${resolved}\``
 }
 
-let cachedModels: string[] | null = null
-let cachedDefaultModel: string | null = null
+interface ListCache<T> { value: T; ts: number }
+let modelListCache: ListCache<string[]> | null = null
+let defaultModelCache: ListCache<string> | null = null
+
+function invalidateModelCache(): void {
+  modelListCache = null
+  defaultModelCache = null
+}
 
 function getModelList(): Promise<string[]> {
   return new Promise((resolve) => {
-    if (cachedModels) return resolve(cachedModels)
+    if (modelListCache && Date.now() - modelListCache.ts < MODEL_LIST_TTL_MS) {
+      return resolve(modelListCache.value)
+    }
     const proc = spawn('opencode', ['models'], { stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
     proc.stdout!.on('data', d => out += d.toString())
     proc.on('close', () => {
       const lines = out.trim().split('\n').filter(Boolean)
-      cachedModels = lines
+      modelListCache = { value: lines, ts: Date.now() }
       resolve(lines)
     })
     proc.on('error', () => resolve([]))
@@ -141,7 +173,9 @@ function getModelList(): Promise<string[]> {
 
 /** Resolve opencode's actual default model name */
 async function resolveDefaultModel(): Promise<string> {
-  if (cachedDefaultModel) return cachedDefaultModel
+  if (defaultModelCache && Date.now() - defaultModelCache.ts < MODEL_LIST_TTL_MS) {
+    return defaultModelCache.value
+  }
 
   // Read opencode.json to find the first configured model as the default
   try {
@@ -157,19 +191,21 @@ async function resolveDefaultModel(): Promise<string> {
         if (p.models && typeof p.models === 'object') {
           const keys = Object.keys(p.models)
           if (keys.length > 0) {
-            cachedDefaultModel = keys[0]
-            return cachedDefaultModel
+            defaultModelCache = { value: keys[0], ts: Date.now() }
+            return keys[0]
           }
         }
       }
     }
   } catch { /* fall through */ }
 
-  // Fallback: use the first model from the model list
   const models = await getModelList()
   if (models.length > 0) {
-    cachedDefaultModel = models[0]
-    return cachedDefaultModel
+    defaultModelCache = { value: models[0], ts: Date.now() }
+    return models[0]
   }
   return 'unknown'
 }
+
+/** Test-only diagnostic: clear caches between cases. */
+export const _internal = { invalidateModelCache }

@@ -215,6 +215,32 @@ export class ILinkClient {
   // ============================================
 
   /**
+   * Lightweight session-keepalive probe. Issues a getconfig call against
+   * the bot's own user id; success → token still valid. Used by the
+   * polling loop's heartbeat tick (does NOT touch the long-poll cursor,
+   * unlike getUpdates).
+   */
+  async pingConfig(): Promise<boolean> {
+    if (!this.botToken || !this.userId) return false
+    const url = `${this.baseUrl}/ilink/bot/getconfig`
+    const body: GetConfigRequest = {
+      ilink_user_id: this.userId,
+      base_info: { channel_version: CHANNEL_VERSION },
+    }
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: this.getAuthHeaders(),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT),
+      })
+      return response.ok
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * Get typing ticket for a user
    */
   async getTypingTicket(
