@@ -60,26 +60,26 @@
 
 ### 2.1 意图分类
 
-- [ ] Intent classifier（规则引擎先行，轻量 LLM 升级）
-- [ ] 命令检测 / sticky session / topic matching / fallback 策略
-- [ ] `/router policy` 可查看当前路由策略
-- [ ] `/router explain` 解释为何路由到某 agent
+- [x] Intent classifier（规则引擎先行）
+- [x] 命令检测 / sticky session / topic matching
+- [x] `/router policy` 可查看当前路由策略
+- [x] `/router explain` 解释为何路由到某 agent
 
 ### 2.2 Agent 画像
 
-- [ ] Agent 能力画像表（擅长域 / cost / latency / health / quota）
-- [ ] Fallback cascade：主挂 → 次选，继承会话
-- [ ] Circuit breaker：连续失败 N 次 → 自动摘除
+- [x] Agent 能力画像表 (intent.ts PROFILES)
+- [x] Circuit breaker：连续 3 次故障 → 5 分钟冷却
 
 ### 2.3 可观测性
 
-- [ ] Audit log (sqlite)：user × intent × agent × duration × cost × outcome
+- [x] Audit log (sqlite)：user × agent × duration × cost × outcome
+- [x] `/audit [n|agent=x|days=7]` 查询命令
 - [ ] Metrics（latency p50/p95/p99、error rate、cost per session）
 
 ### 2.4 预算与限流
 
-- [ ] Per-user quota / budget
-- [ ] Rate-limit token bucket（用户级 + agent 级）
+- [x] Rate-limit token bucket（用户级 10 req/min）
+- [ ] Agent 级限流（已预留 agentLimiter）
 - [ ] 预算告警与拒绝
 
 ---
