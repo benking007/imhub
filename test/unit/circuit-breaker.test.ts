@@ -37,17 +37,62 @@ describe('CircuitBreaker', () => {
     expect(br.recordFailure('a')).toBe(false)
   })
 
-  it('half-opens after the cooldown elapses', async () => {
+  it('grants exactly one probe after cooldown (half-open semantics)', async () => {
     const br = new Breaker(2, 30)
     br.recordFailure('a')
     br.recordFailure('a')
     expect(br.isOpen('a')).toBe(true)
     await new Promise((r) => setTimeout(r, 50))
-    // cooldown elapsed → reported closed (half-open)
+    // First caller after cooldown gets the probe slot — sees not-open.
     expect(br.isOpen('a')).toBe(false)
+    // Subsequent concurrent callers see the breaker as open until the probe
+    // resolves (recordSuccess → close, or recordFailure → re-open).
+    expect(br.isOpen('a')).toBe(true)
     const status = br.getStatus('a')
-    expect(status.failures).toBe(0)
-    expect(status.open).toBe(false)
+    expect(status.phase).toBe('half-open')
+  })
+
+  it('probe success closes the breaker fully', async () => {
+    const br = new Breaker(2, 20)
+    br.recordFailure('a')
+    br.recordFailure('a')
+    await new Promise((r) => setTimeout(r, 30))
+    br.isOpen('a')  // claim the probe
+    br.recordSuccess('a')
+    expect(br.isOpen('a')).toBe(false)
+    expect(br.getStatus('a').phase).toBe('closed')
+  })
+
+  it('probe failure re-opens with doubled cooldown (capped)', async () => {
+    const br = new Breaker(2, 20)
+    br.recordFailure('a')
+    br.recordFailure('a')
+    const initialCooldown = br.getStatus('a').cooldownMs
+    await new Promise((r) => setTimeout(r, 30))
+    br.isOpen('a')  // → half-open
+    const justOpened = br.recordFailure('a')
+    expect(justOpened).toBe(true)
+    expect(br.getStatus('a').phase).toBe('open')
+    expect(br.getStatus('a').cooldownMs).toBe(initialCooldown * 2)
+  })
+
+  it('reset(agent) clears state for that agent only', () => {
+    const br = new Breaker(2, 1_000)
+    br.recordFailure('a')
+    br.recordFailure('a')
+    br.recordFailure('b')
+    expect(br.isOpen('a')).toBe(true)
+    br.reset('a')
+    expect(br.isOpen('a')).toBe(false)
+    expect(br.getStatus('b').failures).toBe(1)
+  })
+
+  it('reset() with no args clears everything', () => {
+    const br = new Breaker(2, 1_000)
+    br.recordFailure('a'); br.recordFailure('a')
+    br.recordFailure('b'); br.recordFailure('b')
+    br.reset()
+    expect(br.listOpen()).toEqual([])
   })
 
   it('recordSuccess immediately closes', () => {
