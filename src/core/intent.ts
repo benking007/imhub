@@ -44,13 +44,38 @@ interface TopicRule {
   description: string
 }
 
+// `\b` only matches between ASCII word chars and other chars — it does
+// nothing for CJK. We split keywords into ASCII (uses \b) and CJK
+// (boundary-free includes). Both branches are OR'd into one regex so
+// callers still get a single .test() call.
+function isCJK(s: string): boolean {
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) || 0
+    if (cp >= 0x3000) return true
+  }
+  return false
+}
+
+function escapeReg(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function topic(words: string[], agent: string, description: string): TopicRule {
+  const ascii = words.filter((w) => !isCJK(w)).map(escapeReg)
+  const cjk = words.filter((w) => isCJK(w)).map(escapeReg)
+  const parts: string[] = []
+  if (ascii.length) parts.push(`\\b(?:${ascii.join('|')})\\b`)
+  if (cjk.length) parts.push(`(?:${cjk.join('|')})`)
+  return { pattern: new RegExp(parts.join('|'), 'iu'), agent, description }
+}
+
 const TOPIC_RULES: TopicRule[] = [
-  { pattern: /\b(git|commit|push|pull|merge|rebase|branch|stash)\b/i, agent: 'opencode', description: 'git operations' },
-  { pattern: /\b(test|测试|spec|coverage|mock|stub)\b/i, agent: 'opencode', description: 'testing' },
-  { pattern: /\b(docker|container|kubernetes|k8s|deploy|ci|cd)\b/i, agent: 'opencode', description: 'devops' },
-  { pattern: /\b(sql|database|db|查询|select|insert|update|delete)\b/i, agent: 'opencode', description: 'database' },
-  { pattern: /\b(review|审查|review|audit|检查)\b/i, agent: 'claude-code', description: 'code review' },
-  { pattern: /\b(explain|解释|what is|为什么|how does|怎么回事)\b/i, agent: 'claude-code', description: 'explanation' },
+  topic(['git', 'commit', 'push', 'pull', 'merge', 'rebase', 'branch', 'stash'], 'opencode', 'git operations'),
+  topic(['test', '测试', 'spec', 'coverage', 'mock', 'stub'], 'opencode', 'testing'),
+  topic(['docker', 'container', 'kubernetes', 'k8s', 'deploy', 'ci', 'cd'], 'opencode', 'devops'),
+  topic(['sql', 'database', 'db', '查询', 'select', 'insert', 'update', 'delete'], 'opencode', 'database'),
+  topic(['review', '审查', 'audit', '检查'], 'claude-code', 'code review'),
+  topic(['explain', '解释', 'what is', '为什么', 'how does', '怎么回事'], 'claude-code', 'explanation'),
 ]
 
 export interface IntentResult {
@@ -73,10 +98,18 @@ export function classifyIntent(
     throw new Error('No agents available')
   }
 
-  // Score per agent
-  const scores = new Map<string, { score: number; reasons: string[] }>()
+  // Score per agent. Agents missing from PROFILES (e.g. user-installed
+  // custom ACP agents) get a default neutral weight so they remain
+  // selectable when no explicit signal favors a profiled agent.
+  const DEFAULT_WEIGHT = 0.5
+  const scores = new Map<string, { score: number; reasons: string[]; weight: number }>()
   for (const a of available) {
-    scores.set(a, { score: 0, reasons: [] })
+    const profile = PROFILES[a]
+    scores.set(a, {
+      score: 0,
+      reasons: profile ? [] : ['default weight (no profile)'],
+      weight: profile?.weight ?? DEFAULT_WEIGHT,
+    })
   }
 
   const lower = text.toLowerCase()
@@ -92,7 +125,9 @@ export function classifyIntent(
     }
   }
 
-  // 2. Keyword matching per agent
+  // 2. Keyword matching (uses each agent's own weight; profile-less agents
+  // can't keyword-match because they have no keywords list, but they still
+  // earn their base weight below).
   for (const [agent, profile] of Object.entries(PROFILES)) {
     const s = scores.get(agent)
     if (!s) continue
@@ -103,22 +138,45 @@ export function classifyIntent(
         s.reasons.push(`keyword: "${kw}"`)
       }
     }
-    // Add base weight
-    s.score += profile.weight * 0.5
   }
 
-  // 3. Sticky session bias
+  // 3. Base weight per agent (so a profile-less custom agent has a non-zero
+  // floor and won't be permanently dominated).
+  for (const [, s] of scores) {
+    s.score += s.weight * 0.5
+  }
+
+  // 4. Sticky session bias
   if (stickyAgent && scores.has(stickyAgent)) {
     const s = scores.get(stickyAgent)!
     s.score += 3
     s.reasons.push('sticky: last used agent')
   }
 
-  // Pick best
+  // Tie-break order:
+  //   1. higher score wins
+  //   2. sticky agent (if present in scores)
+  //   3. PROFILES declaration order (preserves intentional priority)
+  //   4. alphabetical, for full determinism
+  const profileOrder = Object.keys(PROFILES)
+  const rankOf = (agent: string): number => {
+    if (stickyAgent && agent === stickyAgent) return -1
+    const idx = profileOrder.indexOf(agent)
+    return idx === -1 ? profileOrder.length : idx
+  }
+
   let best: { agent: string; score: number; reasons: string[] } | null = null
   for (const [agent, s] of scores) {
-    if (!best || s.score > best!.score) {
+    if (!best) { best = { agent, score: s.score, reasons: s.reasons }; continue }
+    if (s.score > best.score) {
       best = { agent, score: s.score, reasons: s.reasons }
+      continue
+    }
+    if (s.score === best.score) {
+      const cmp = rankOf(agent) - rankOf(best.agent)
+      if (cmp < 0 || (cmp === 0 && agent < best.agent)) {
+        best = { agent, score: s.score, reasons: s.reasons }
+      }
     }
   }
   if (!best) {
@@ -127,7 +185,15 @@ export function classifyIntent(
     return { agent, score: 0, reason: 'fallback (no matches)', triggeredBy: 'fallback' }
   }
 
-  const triggeredBy = stickyAgent === best.agent ? 'sticky' : best.reasons.length > 0 ? 'keyword' : 'fallback'
+  const isSticky = stickyAgent === best.agent && best.reasons.includes('sticky: last used agent')
+  const hasTopic = best.reasons.some(r => r.startsWith('topic:'))
+  const hasKeyword = best.reasons.some(r => r.startsWith('keyword:'))
+  const triggeredBy: IntentResult['triggeredBy'] =
+    hasTopic ? 'topic'
+    : hasKeyword ? 'keyword'
+    : isSticky ? 'sticky'
+    : 'fallback'
+
   return {
     agent: best.agent,
     score: Math.round(best.score * 100) / 100,

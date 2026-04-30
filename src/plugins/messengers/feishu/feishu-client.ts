@@ -3,6 +3,9 @@
 
 import * as Lark from '@larksuiteoapi/node-sdk'
 import type { FeishuConfig } from './types.js'
+import { logger as rootLogger } from '../../../core/logger.js'
+
+const log = rootLogger.child({ component: 'feishu-client' })
 
 // Message event type from Feishu SDK
 interface MessageReceiveEvent {
@@ -139,12 +142,12 @@ export class FeishuClient {
     await this.wsClient.start({
       eventDispatcher: this.eventDispatcher,
     })
-    console.log('[Feishu] WebSocket long polling started')
+    log.info('WebSocket long polling started')
   }
 
   async stop(): Promise<void> {
     this.wsClient.close()
-    console.log('[Feishu] WebSocket connection stopped')
+    log.info('WebSocket connection stopped')
   }
 
   // ============================================

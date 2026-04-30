@@ -64,7 +64,19 @@ export async function handleRouterCommand(
 当前 sticky: ${sticky || '无'}`
     }
 
+    case 'reset': {
+      // /router reset           → clear all breakers
+      // /router reset <agent>   → clear one agent's breaker
+      const target = parts[1]
+      if (target) {
+        circuitBreaker.reset(target)
+        return `✅ Cleared circuit breaker for "${target}".`
+      }
+      circuitBreaker.reset()
+      return '✅ Cleared all circuit breakers.'
+    }
+
     default:
-      return `用法: /router [status|policy|explain <msg>]`
+      return `用法: /router [status|policy|explain <msg>|reset [<agent>]]`
   }
 }

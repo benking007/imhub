@@ -148,6 +148,10 @@ export function checkMessengerConfig(config: Config): OnboardingResult {
 let agentCheckCache: { result: AgentCheckResult; timestamp: number } | null = null
 const AGENT_CHECK_CACHE_TTL = 2 * 60 * 1000 // 2 minutes
 
+/** Per-agent cached `isAvailable()` results — bypasses the bulk cache when
+ * a freshly-registered agent isn't represented in it yet. */
+const perAgentCache = new Map<string, { ok: boolean; timestamp: number }>()
+
 /**
  * Check which agents are available.
  * Result is cached with a 2-minute TTL.
@@ -169,8 +173,10 @@ export async function checkAgentAvailability(): Promise<AgentCheckResult> {
         } else {
           missing.push(name)
         }
+        perAgentCache.set(name, { ok: isAvail, timestamp: Date.now() })
       } catch {
         missing.push(name)
+        perAgentCache.set(name, { ok: false, timestamp: Date.now() })
       }
     }
   }
@@ -184,11 +190,41 @@ export async function checkAgentAvailability(): Promise<AgentCheckResult> {
 }
 
 /**
- * Check if a specific agent is available (uses cache)
+ * Check if a specific agent is available.
+ *
+ * Uses the bulk cache when present, but falls through to a one-off probe
+ * if the agent name isn't represented (e.g. agent registered after the
+ * last bulk refresh). The probe result is itself cached for the TTL.
  */
 export async function isAgentAvailableCached(agentName: string): Promise<boolean> {
-  const result = await checkAgentAvailability()
-  return result.available.includes(agentName)
+  const bulk = await checkAgentAvailability()
+  if (bulk.available.includes(agentName)) return true
+  if (bulk.missing.includes(agentName)) return false
+
+  // Not represented in bulk — probe directly with a per-agent cache.
+  const cached = perAgentCache.get(agentName)
+  if (cached && Date.now() - cached.timestamp < AGENT_CHECK_CACHE_TTL) {
+    return cached.ok
+  }
+  const agent = registry.findAgent(agentName)
+  if (!agent) return false
+  try {
+    const ok = await agent.isAvailable()
+    perAgentCache.set(agentName, { ok, timestamp: Date.now() })
+    return ok
+  } catch {
+    perAgentCache.set(agentName, { ok: false, timestamp: Date.now() })
+    return false
+  }
+}
+
+/**
+ * Clear the agent availability caches. Useful for tests that change the
+ * registry state, and for the future `/router refresh` ops command.
+ */
+export function clearAgentCache(): void {
+  agentCheckCache = null
+  perAgentCache.clear()
 }
 
 // ============================================

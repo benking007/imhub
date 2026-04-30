@@ -8,31 +8,42 @@
 // Runs on a separate port (default 9090). Reuses web token for auth.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
-import { randomBytes } from 'crypto'
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { randomBytes, timingSafeEqual } from 'crypto'
+import { readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { parseMessage, routeMessage, type RouteContext } from './router.js'
 import { generateTraceId, createLogger, logger as rootLogger } from './logger.js'
 import { registry } from './registry.js'
+import { createJob, getJob, runJob } from './job-board.js'
 
 const DEFAULT_ACP_PORT = 9090
 const WEB_TOKEN_DIR = join(homedir(), '.im-hub')
 const WEB_TOKEN_FILE = join(WEB_TOKEN_DIR, 'web-token')
+/** Max POST body size (per ACP request). Larger requests get 413. */
+const MAX_BODY_BYTES = 1 * 1024 * 1024  // 1 MiB
 
 function getToken(): string | null {
   try { return readFileSync(WEB_TOKEN_FILE, 'utf-8').trim() } catch { return null }
 }
 
+/** Constant-time string compare. Returns false if lengths differ. */
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a)
+  const bufB = Buffer.from(b)
+  if (bufA.length !== bufB.length) return false
+  return timingSafeEqual(bufA, bufB)
+}
+
 function parseAuth(req: IncomingMessage): { ok: boolean; error?: string } {
   const token = getToken()
   if (!token) return { ok: false, error: 'Server not configured' }
-  const auth = req.headers['authorization'] || ''
-  if (auth === `Bearer ${token}`) return { ok: true }
+  const auth = String(req.headers['authorization'] || '')
+  if (auth.startsWith('Bearer ') && safeEqual(auth.slice(7), token)) return { ok: true }
 
   // Also accept X-IM-Hub-Token header
-  const xToken = req.headers['x-im-hub-token'] as string || ''
-  if (xToken === token) return { ok: true }
+  const xToken = String(req.headers['x-im-hub-token'] || '')
+  if (xToken && safeEqual(xToken, token)) return { ok: true }
 
   return { ok: false, error: 'Unauthorized' }
 }
@@ -42,16 +53,48 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data))
 }
 
-async function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
-    let body = ''
-    req.on('data', (c: Buffer) => { body += c.toString() })
-    req.on('end', () => resolve(body))
+/**
+ * Read POST body with a hard cap. When the limit is exceeded we write a
+ * 413 response, drain (and discard) the remainder of the request, and
+ * reject — letting the caller `return` early. We do NOT destroy the
+ * socket because that races with the response flush.
+ */
+async function readBody(req: IncomingMessage, res: ServerResponse): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let total = 0
+    let aborted = false
+    req.on('data', (c: Buffer) => {
+      if (aborted) return
+      total += c.length
+      if (total > MAX_BODY_BYTES) {
+        aborted = true
+        if (!res.headersSent) {
+          sendJson(res, 413, { error: 'Request body too large' })
+        }
+        const err = new Error('Request body too large') as Error & { statusCode?: number; handled?: boolean }
+        err.statusCode = 413
+        err.handled = true
+        reject(err)
+        return
+      }
+      chunks.push(c)
+    })
+    req.on('end', () => {
+      if (aborted) return
+      resolve(Buffer.concat(chunks).toString('utf-8'))
+    })
+    req.on('error', (err) => {
+      if (!aborted) reject(err)
+    })
   })
 }
 
-// In-memory task store (minimal, to be replaced by Job Board in Phase 3.3)
-const taskStore = new Map<string, { status: string; result?: string; error?: string }>()
+/**
+ * Map of task id → (job id, last cached status) for quick GET /tasks/:id
+ * lookups. The actual durable record lives in the Job Board.
+ */
+const taskIndex = new Map<string, { jobId: number }>()
 
 export async function startACPServer(options: {
   port?: number
@@ -91,21 +134,41 @@ export async function startACPServer(options: {
     // POST /tasks
     if (req.method === 'POST' && url.pathname === '/tasks') {
       try {
-        const body = await readBody(req)
-        const { input, mode } = JSON.parse(body)
+        const body = await readBody(req, res)
+        const parsedBody = JSON.parse(body) as { input?: { prompt?: string }; mode?: string; session_id?: string }
+        const input = parsedBody.input
+        const mode = parsedBody.mode
+        const upstreamSessionId = parsedBody.session_id
         if (!input?.prompt) {
           sendJson(res, 400, { error: 'Missing input.prompt' })
           return
         }
 
         const taskId = randomBytes(8).toString('hex')
-        const traceId = generateTraceId()
-        const logger = createLogger({ traceId, platform: 'acp-server', component: 'acp' })
+        // Inherit upstream trace id when present so distributed tracing
+        // links across the boundary.
+        const incomingTrace = String(req.headers['x-trace-id'] || '').trim()
+        const traceId = incomingTrace || generateTraceId()
+        const logger = createLogger({ traceId, platform: 'acp-server', component: 'acp', taskId })
 
-        taskStore.set(taskId, { status: 'running' })
+        // Persist in Job Board so the task survives restarts and shares the
+        // /job toolset with messenger-originated jobs. If the board is
+        // unavailable (SQLite not loadable) we still serve the request —
+        // jobId stays 0 and GET /tasks/:id falls back to "task not found".
+        let jobId = 0
+        try {
+          jobId = createJob('acp:gateway', input.prompt)
+          taskIndex.set(taskId, { jobId })
+        } catch (err) {
+          logger.warn({ event: 'acp.job-board.unavailable', err: err instanceof Error ? err.message : String(err) },
+            'Job board unavailable — task will not be persisted')
+        }
 
         const routeCtx: RouteContext = {
-          threadId: `acp:${taskId}`,
+          // Use the upstream session_id (when supplied) as the thread key
+          // so subsequent calls in the same conversation hit the same
+          // im-hub Session and preserve conversation history.
+          threadId: upstreamSessionId ? `acp:session:${upstreamSessionId}` : `acp:${taskId}`,
           channelId: 'acp',
           platform: 'acp',
           defaultAgent: options.defaultAgent,
@@ -123,21 +186,30 @@ export async function startACPServer(options: {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
+            'X-Task-Id': taskId,
           })
 
           let fullText = ''
-          if (typeof result === 'string') {
-            res.write(`data: ${JSON.stringify({ output: { content: result } })}\n\n`)
-            fullText = result
-          } else {
-            for await (const chunk of result) {
-              fullText += chunk
-              res.write(`data: ${JSON.stringify({ output: { content: chunk } })}\n\n`)
+          try {
+            if (typeof result === 'string') {
+              res.write(`data: ${JSON.stringify({ output: { content: result } })}\n\n`)
+              fullText = result
+            } else {
+              for await (const chunk of result) {
+                fullText += chunk
+                res.write(`data: ${JSON.stringify({ output: { content: chunk } })}\n\n`)
+              }
             }
+            res.write('data: [DONE]\n\n')
+            // Run + complete via Job Board so the same job row carries the
+            // result. We push the completed text through a synthetic runner
+            // that yields it once, lets job-board flip status to completed.
+            if (jobId) {
+              await runJob(jobId, async function* () { yield fullText }, logger).catch(() => { /* job board flaky */ })
+            }
+          } finally {
+            res.end()
           }
-          res.write('data: [DONE]\n\n')
-          taskStore.set(taskId, { status: 'completed', result: fullText })
-          res.end()
           return
         }
 
@@ -150,15 +222,20 @@ export async function startACPServer(options: {
             fullResponse += chunk
           }
         }
-        taskStore.set(taskId, { status: 'completed', result: fullResponse })
+        if (jobId) {
+          await runJob(jobId, async function* () { yield fullResponse }, logger).catch(() => { /* job board flaky */ })
+        }
         sendJson(res, 200, {
           id: taskId,
           status: 'completed',
           output: { content: fullResponse },
         })
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        sendJson(res, 500, { error: msg })
+        const e = err as Error & { statusCode?: number; handled?: boolean }
+        if (e?.handled) return  // 413 already sent by readBody
+        const status = e?.statusCode || 500
+        const msg = e instanceof Error ? e.message : String(err)
+        if (!res.headersSent) sendJson(res, status, { error: msg })
       }
       return
     }
@@ -166,9 +243,16 @@ export async function startACPServer(options: {
     // GET /tasks/:id
     const taskMatch = url.pathname.match(/^\/tasks\/([a-z0-9]+)$/)
     if (req.method === 'GET' && taskMatch) {
-      const task = taskStore.get(taskMatch[1])
-      if (!task) { sendJson(res, 404, { error: 'Task not found' }); return }
-      sendJson(res, 200, { id: taskMatch[1], status: task.status, output: task.result ? { content: task.result } : undefined, error: task.error })
+      const idx = taskIndex.get(taskMatch[1])
+      if (!idx) { sendJson(res, 404, { error: 'Task not found' }); return }
+      const job = getJob(idx.jobId)
+      if (!job) { sendJson(res, 404, { error: 'Task record not found' }); return }
+      sendJson(res, 200, {
+        id: taskMatch[1],
+        status: job.status,
+        output: job.result ? { content: job.result } : undefined,
+        error: job.error || undefined,
+      })
       return
     }
 

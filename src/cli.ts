@@ -87,6 +87,10 @@ program
       await registry.loadACPAgents(config.acpAgents)
     }
 
+    // Start the scheduler (runs cron-due schedules every 30s)
+    const { startScheduler } = await import('./core/schedule.js')
+    startScheduler()
+
     // ============================================
     // ONBOARDING CHECKS (before default fill!)
     // ============================================
@@ -571,8 +575,7 @@ program
       case 'copilot':
         console.log('🤖 Configuring GitHub Copilot CLI agent...')
         // Check if copilot CLI is available (multiple installation methods)
-        const { CopilotAdapter } = await import('./plugins/agents/copilot/index.js')
-        const copilotAdapter = new CopilotAdapter()
+        const { copilotAdapter } = await import('./plugins/agents/copilot/index.js')
         const copilotAvailable = await copilotAdapter.isAvailable()
         if (copilotAvailable) {
           console.log('✅ GitHub Copilot CLI found!')

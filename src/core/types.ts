@@ -34,6 +34,8 @@ export type ParsedMessage =
   | { type: 'agent'; agent: string; prompt: string }
   | { type: 'audit'; args: string }
   | { type: 'router'; args: string }
+  | { type: 'workspaces'; args: string }
+  | { type: 'schedule'; args: string }
   | { type: 'job'; args: string }
   | { type: 'error'; prompt: string; error: string }
 

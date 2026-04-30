@@ -8,6 +8,9 @@ import type { FeishuConfig } from './types.js'
 import { homedir } from 'os'
 import { join } from 'path'
 import { readFile } from 'fs/promises'
+import { logger as rootLogger } from '../../../core/logger.js'
+
+const log = rootLogger.child({ component: 'feishu' })
 
 const CONFIG_FILE = join(homedir(), '.im-hub', 'config.json')
 
@@ -66,8 +69,7 @@ export class FeishuAdapter implements MessengerAdapter {
     await this.client.start()
 
     this.isRunning = true
-    console.log('🚀 Feishu adapter started (WebSocket long polling mode)')
-    console.log('   No webhook configuration needed!')
+    log.info('Feishu adapter started (WebSocket long polling mode, no webhook needed)')
   }
 
   async stop(): Promise<void> {
@@ -77,7 +79,7 @@ export class FeishuAdapter implements MessengerAdapter {
       await this.client.stop()
     }
 
-    console.log('👋 Feishu adapter stopped')
+    log.info('Feishu adapter stopped')
   }
 
   onMessage(handler: (ctx: MessageContext) => Promise<void>): void {
@@ -111,7 +113,7 @@ export class FeishuAdapter implements MessengerAdapter {
     // Note: The typing indicator is handled by Feishu's built-in UI
     // when a message is being processed. No explicit API call needed.
     if (isTyping) {
-      console.log('[Feishu] Processing message...')
+      log.debug({ threadId }, 'Processing message')
     }
   }
 
@@ -120,38 +122,36 @@ export class FeishuAdapter implements MessengerAdapter {
   // ============================================
 
   private async handleFeishuMessage(event: MessageReceiveEvent): Promise<void> {
-    console.log('[Feishu] Received message event')
+    log.debug('Received message event')
 
     if (!this.messageHandler) {
-      console.log('[Feishu] No message handler registered')
+      log.debug('No message handler registered')
       return
     }
 
     const sender = event.sender
     const message = event.message
 
-    // Skip bot messages
     if (sender.sender_type === 'app') {
-      console.log('[Feishu] Ignoring bot message')
+      log.debug('Ignoring bot message')
       return
     }
 
-    // Parse message content
     let text = ''
     try {
       const content = JSON.parse(message.content || '{}')
       text = content.text || ''
     } catch {
-      console.log('[Feishu] Failed to parse message content')
+      log.warn({ messageId: message.message_id }, 'Failed to parse message content')
       return
     }
 
     if (!text) {
-      console.log('[Feishu] Empty message text')
+      log.debug('Empty message text')
       return
     }
 
-    console.log('[Feishu] Message:', text)
+    log.debug({ text }, 'Message received')
 
     const msg: Message = {
       id: message.message_id || '',
@@ -170,8 +170,10 @@ export class FeishuAdapter implements MessengerAdapter {
 
     try {
       await this.messageHandler(ctx)
-    } catch (error) {
-      console.error('[Feishu] Error in message handler:', error)
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      const stack = err instanceof Error ? err.stack : undefined
+      log.error({ err: errMsg, stack }, 'Error in message handler')
     }
   }
 }

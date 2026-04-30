@@ -45,6 +45,43 @@ export class RateLimiter {
     }
   }
 
+  /** Read the bucket's static configuration (no key required). */
+  config(): { rate: number; intervalSec: number; burst: number } {
+    return {
+      rate: this.rate,
+      intervalSec: Math.round(this.intervalMs / 1000),
+      burst: this.burst,
+    }
+  }
+
+  /**
+   * Best-effort estimate (epoch ms) of when the next token will be available
+   * for `key`. If the bucket already has tokens, returns now.
+   */
+  nextAllowAt(key: string): number {
+    const b = this.getBucket(key)
+    if (b.tokens > 0) return Date.now()
+    // We add `rate` tokens every `intervalMs` from `lastRefill`. The next
+    // refill arrives at `lastRefill + intervalMs`.
+    return b.lastRefill + this.intervalMs
+  }
+
+  /**
+   * Drop buckets that have been idle for at least `idleMs` milliseconds.
+   * Run periodically to bound memory under bursty workloads.
+   */
+  cleanup(idleMs = 30 * 60 * 1000): number {
+    const now = Date.now()
+    let dropped = 0
+    for (const [key, b] of this.buckets) {
+      if (now - b.lastRefill > idleMs) {
+        this.buckets.delete(key)
+        dropped++
+      }
+    }
+    return dropped
+  }
+
   private getBucket(key: string): Bucket {
     const now = Date.now()
     let b = this.buckets.get(key)

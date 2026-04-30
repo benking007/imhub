@@ -10,9 +10,12 @@ import { handleAgentCommand } from './commands/agent.js'
 import { handleAuditCommand } from './commands/audit.js'
 import { handleRouterCommand } from './commands/router.js'
 import { handleJobCommand } from './commands/job.js'
+import { handleWorkspacesCommand } from './commands/workspaces.js'
+import { handleScheduleCommand } from './commands/schedule.js'
 import { logInvocation } from './audit-log.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { classifyIntent } from './intent.js'
+import { classifyWithLLM, getLLMJudge } from './intent-llm.js'
 import { userLimiter } from './rate-limiter.js'
 import { workspaceRegistry } from './workspace.js'
 import { getJob } from './job-board.js'
@@ -26,10 +29,27 @@ export interface RouteContext {
   traceId: string
   logger: Logger
   userId?: string
+  /** Set by the routing layer when intent classification picks the agent.
+   * Audit log records this so we can answer "why was this agent chosen?". */
+  intent?: string
 }
 
 /** Built-in coding agent commands forwarded to the active agent */
 const AGENT_COMMANDS = new Set(['test', 'review', 'commit', 'push', 'diff', 'shell', 'bug', 'explain'])
+
+/**
+ * Build the rate-limit user-facing error string. Picks the effective
+ * limiter (workspace's own limiter for named workspaces, otherwise the
+ * shared userLimiter) so the wait estimate matches the bucket that
+ * actually rejected the request.
+ */
+function formatRateLimitError(ws: ReturnType<typeof workspaceRegistry.resolve>, key: string): string {
+  const limiter = ws.id === 'default' ? userLimiter : ws.limiter
+  const s = limiter.status(key)
+  const waitSec = Math.max(0, Math.ceil((limiter.nextAllowAt(key) - Date.now()) / 1000))
+  const tail = waitSec > 0 ? `，请在约 ${waitSec} 秒后重试` : ''
+  return `⏱️ 请求过于频繁（${s.rate} 次/${s.intervalSec}秒，剩余 ${s.remaining}）${tail}`
+}
 
 /**
  * Parse a message to determine how to route it
@@ -62,6 +82,8 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'new') return { type: 'command', command: 'new' }
   if (cmd === 'audit') return { type: 'audit', args: rest }
   if (cmd === 'router') return { type: 'router', args: rest }
+  if (cmd === 'workspaces' || cmd === 'ws') return { type: 'workspaces', args: rest }
+  if (cmd === 'schedule' || cmd === 'cron') return { type: 'schedule', args: rest }
   if (cmd === 'job' || cmd === 'task') return { type: 'job', args: rest }
   if (cmd === 'tasks') return { type: 'job', args: 'list' }
   if (cmd === 'check') return { type: 'job', args: `check ${rest}` }
@@ -108,6 +130,14 @@ export async function routeMessage(
       return handleRouterCommand(parsed.args, ctx)
     }
 
+    case 'workspaces': {
+      return handleWorkspacesCommand(parsed.args, ctx)
+    }
+
+    case 'schedule': {
+      return handleScheduleCommand(parsed.args, ctx)
+    }
+
     case 'job': {
       return handleJobCommand(parsed.args, ctx)
     }
@@ -116,6 +146,24 @@ export async function routeMessage(
       const agent = registry.findAgent(parsed.agent)
       if (!agent) {
         return `❌ Agent "${parsed.agent}" not found. Use /agents to see available agents.`
+      }
+
+      // Workspace whitelist must apply to explicit /<agent> too — otherwise
+      // a named workspace with `agents: ['oc']` cannot stop a member from
+      // bypassing it via /cc directly.
+      const wsAgent = workspaceRegistry.resolve(ctx.userId || 'unknown')
+      if (!wsAgent.hasAgent(agent.name)) {
+        return `🚫 Agent "${agent.name}" is not available in your workspace.\n\nTry /agents to see available agents.`
+      }
+
+      // Per-workspace rate limit (falls back to userLimiter for default
+      // workspace which has no explicit limiter override).
+      const limitKeyAgent = `${ctx.platform}:${ctx.userId || 'unknown'}`
+      const allowedAgent = wsAgent.id === 'default'
+        ? userLimiter.allow(limitKeyAgent)
+        : wsAgent.allow(limitKeyAgent)
+      if (!allowedAgent) {
+        return formatRateLimitError(wsAgent, limitKeyAgent)
       }
 
       if (circuitBreaker.isOpen(agent.name)) {
@@ -135,6 +183,7 @@ export async function routeMessage(
       const session = await sessionManager.getOrCreateSession(
         ctx.platform, ctx.channelId, ctx.threadId, agent.name
       )
+      ctx.intent = 'explicit'
       return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx)
     }
 
@@ -143,11 +192,15 @@ export async function routeMessage(
     }
 
     case 'default': {
-      // Rate limit check (per user)
+      // Resolve workspace upfront so rate-limit & whitelist share the same
+      // tenant context.
+      const ws = workspaceRegistry.resolve(ctx.userId || 'unknown')
       const limitKey = `${ctx.platform}:${ctx.userId || 'unknown'}`
-      if (!userLimiter.allow(limitKey)) {
-        const s = userLimiter.status(limitKey)
-        return `⏱️ 请求过于频繁，请稍后再试。（${s.rate} 次/${s.intervalSec}秒，当前剩余 ${s.remaining}）`
+      const allowed = ws.id === 'default'
+        ? userLimiter.allow(limitKey)
+        : ws.allow(limitKey)
+      if (!allowed) {
+        return formatRateLimitError(ws, limitKey)
       }
 
       const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
@@ -180,16 +233,40 @@ export async function routeMessage(
       const stickyAgent = existingSession?.agent
       let agentName: string
       let intent: string = 'fallback'
+      let ruleScore = 0
 
       try {
         const classification = classifyIntent(parsed.prompt, stickyAgent, ctx.logger)
         agentName = classification.agent
         intent = classification.triggeredBy
+        ruleScore = classification.score
         ctx.logger.info({ event: 'router.intent', agent: agentName, intent, score: classification.score, reason: classification.reason })
       } catch {
         agentName = stickyAgent || ctx.defaultAgent
         ctx.logger.warn({ event: 'router.intent.failed', fallback: agentName })
       }
+
+      // P2-H: when the rule-based classifier produced a low-confidence
+      // pick (no topic/keyword match) and an LLM judge is configured,
+      // ask the judge. We only consider it for *non-sticky* requests so
+      // active conversations stay deterministic.
+      const judge = getLLMJudge()
+      if (judge && intent === 'fallback' && ruleScore < (judge.threshold ?? 1.0) && !stickyAgent) {
+        const candidates = workspaceRegistry.resolve(ctx.userId || 'unknown').agentWhitelist.size === 0
+          ? registry.listAgents().filter((a) => !circuitBreaker.isOpen(a))
+          : registry.listAgents().filter((a) =>
+              !circuitBreaker.isOpen(a) &&
+              workspaceRegistry.resolve(ctx.userId || 'unknown').hasAgent(a))
+        const picked = await classifyWithLLM(parsed.prompt, candidates, (n) => registry.findAgent(n))
+        if (picked) {
+          agentName = picked.agent
+          intent = 'llm'
+          ctx.logger.info({ event: 'router.intent.llm', agent: agentName, reason: picked.reason })
+        }
+      }
+
+      // Stash on ctx so callAgentWithHistory writes it into the audit row.
+      ctx.intent = intent
 
       const agent = registry.findAgent(agentName)
       if (!agent) {
@@ -201,8 +278,8 @@ export async function routeMessage(
         return `⛔ ${agent.name} is temporarily unavailable (circuit breaker open).\nCurrently blocked: ${openAgents || 'none'}\n\nTry /agents to see available agents, or wait a few minutes.`
       }
 
-      // Workspace agent whitelist check
-      const ws = workspaceRegistry.resolve(ctx.userId || 'unknown')
+      // Workspace already resolved above — check the whitelist before
+      // exposing the agent to the message.
       if (!ws.hasAgent(agent.name)) {
         return `🚫 Agent "${agent.name}" is not available in your workspace.\n\nTry /agents to see available agents.`
       }
@@ -277,17 +354,24 @@ export async function callAgentWithHistory(
         responseLen: fullResponse.length,
       })
 
-      // Write audit record + update circuit breaker
+      // Write audit record + update circuit breaker. Cost defaults to 0
+      // for adapters that don't surface usage; future per-agent enrichers
+      // can attach a `lastUsageCost` getter for token-based pricing.
+      const costFn = (agent as unknown as { getLastCost?: () => number })?.getLastCost
+      const cost = typeof costFn === 'function' ? Number(costFn.call(agent)) || 0 : 0
+
       logInvocation({
         traceId: ctx.traceId,
         userId: ctx.userId || 'unknown',
         platform: ctx.platform,
         agent: agent!.name,
-        intent: 'default',
+        // Carry the intent the router picked (or 'explicit' for /<agent>
+        // commands which set ctx.intent='explicit' upstream).
+        intent: ctx.intent || 'default',
         promptLen: prompt.length,
         responseLen: fullResponse.length,
         durationMs,
-        cost: 0,
+        cost,
         success: !invocationError,
         error: invocationError,
       })

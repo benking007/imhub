@@ -1,10 +1,15 @@
 // AgentBase — base class for CLI-based agent adapters
 //
-// Provides unified: isAvailable (spawn check), sendPrompt (spawn + JSONL parse),
-// buildContextualPrompt, timeout management, and session tracking.
+// Provides a unified streaming JSONL invocation pipeline:
+//   sendPrompt        — true AsyncGenerator that yields chunks live
+//   spawnAndCollect   — Promise<string> wrapper for job-board / sync calls
+//   isAvailable       — `--version` probe
+//   buildContextualPrompt / buildArgs / extractText — subclass hooks
 //
-// Subclasses override: buildArgs(), extractText().
+// Subclasses must implement: buildArgs(), extractText().
+// Optional override: handleError(), notAvailableMessage(), commandName.
 
+import { StringDecoder } from 'string_decoder'
 import type { AgentAdapter, ChatMessage } from './types.js'
 import { crossSpawn } from '../utils/cross-platform.js'
 import { logger as rootLogger } from './logger.js'
@@ -21,6 +26,36 @@ function resolveTimeout(envKey: string, fallback: number): number {
       `Invalid timeout env "${envKey}=${raw}", using default ${Math.round(fallback / 60000)}min`)
   }
   return fallback
+}
+
+/**
+ * Buffer line splitter that respects UTF-8 multi-byte boundaries.
+ * Pushes complete lines; pending partial line (no trailing newline) is held
+ * until flush().
+ */
+class LineBuffer {
+  private decoder = new StringDecoder('utf8')
+  private partial = ''
+
+  push(chunk: Buffer): string[] {
+    this.partial += this.decoder.write(chunk)
+    const lines = this.partial.split('\n')
+    this.partial = lines.pop() || ''
+    return lines
+  }
+
+  flush(): string[] {
+    const tail = this.decoder.end()
+    const all = (this.partial + tail).split('\n')
+    this.partial = ''
+    return all.filter((l) => l.length > 0)
+  }
+}
+
+/** Internal record of a single streaming agent run. */
+export interface SpawnEvent {
+  /** Text chunk to surface to the caller. */
+  text: string
 }
 
 export abstract class AgentBase implements AgentAdapter {
@@ -61,16 +96,17 @@ export abstract class AgentBase implements AgentAdapter {
     return { ok, latencyMs: Date.now() - start }
   }
 
+  /**
+   * Stream JSONL chunks live. Yields each `extractText` result as it
+   * arrives; on non-zero exit, yields the friendly error tail (if any) and
+   * returns.
+   */
   async *sendPrompt(_sessionId: string, prompt: string, history?: ChatMessage[]): AsyncGenerator<string> {
     rootLogger.info({ component: `agent.${this.name}`, agent: this.name, historyLen: history?.length || 0 },
       `[${this.name}] sendPrompt`)
 
     const contextualPrompt = this.buildContextualPrompt(prompt, history)
-    const result = await this.spawnAndCollect(contextualPrompt)
-
-    if (result) {
-      yield result
-    }
+    yield* this.spawnStream(contextualPrompt)
   }
 
   /**
@@ -93,109 +129,188 @@ export abstract class AgentBase implements AgentAdapter {
   }
 
   /**
-   * Spawn the CLI process with JSONL output, collect full text via extractText.
+   * Sync convenience wrapper: drain the streaming generator into a single
+   * string. Used by Job Board where the caller wants the final result.
    */
-  /** Public: spawn the CLI process and collect text. Accepts abort signal for cancellation. */
-  public spawnAndCollect(prompt: string, signal?: AbortSignal): Promise<string> {
+  public async spawnAndCollect(prompt: string, signal?: AbortSignal): Promise<string> {
+    let acc = ''
+    for await (const chunk of this.spawnStream(prompt, signal)) {
+      acc += chunk
+    }
+    return acc
+  }
+
+  /**
+   * Core streaming pipeline: spawn the CLI, parse JSONL line-by-line, yield
+   * each extracted text fragment. Handles timeout, abort, and process exit
+   * with cleanup of all timers and listeners.
+   */
+  protected async *spawnStream(prompt: string, signal?: AbortSignal): AsyncGenerator<string> {
     const timeout = this.timeoutMs
+    const args = this.buildArgs(prompt)
+    const proc = crossSpawn(this.commandName, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
 
-    return new Promise((resolve, reject) => {
-      const args = this.buildArgs(prompt)
-      const proc = crossSpawn(this.commandName, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
+    const buf = new LineBuffer()
+    const stderrBuf = new LineBuffer()
+    let stderrAccum = ''
+    let errorMessage = ''
+    let pendingChunks: string[] = []
+    let closed = false
+    let exitCode: number | null = null
+    let spawnError: Error | null = null
+    let timedOut = false
+    let aborted = false
 
-      let stdout = ''
-      let stderr = ''
-      let fullText = ''
-      let errorMessage = ''
-      let resolved = false
+    // Each `notify` resolves the current poll cycle; the consumer awaits a
+    // promise that flips whenever new state is available.
+    let notify: (() => void) | null = null
+    const wait = (): Promise<void> => new Promise((resolve) => { notify = resolve })
+    const ping = (): void => { const n = notify; notify = null; n?.() }
 
-      const finalize = (msg: string) => {
-        if (resolved) return
-        resolved = true
-        clearTimeout(timer)
-        proc.kill('SIGTERM')
-        setTimeout(() => { try { proc.kill('SIGKILL') } catch { /* ignore */ } }, 5000)
-        resolve(msg)
-      }
+    const timer = setTimeout(() => {
+      timedOut = true
+      try { proc.kill('SIGTERM') } catch { /* ignore */ }
+      ping()
+    }, timeout)
 
-      const timer = setTimeout(() => {
-        rootLogger.warn({ component: `agent.${this.name}`, agent: this.name, timeoutMs: timeout },
-          `[${this.name}] timeout after ${Math.round(timeout / 60000)}min`)
-        finalize(fullText
-          ? fullText + `\n\n⚠️ 处理超时（已超过 ${Math.round(timeout / 60000)} 分钟）`
-          : `⚠️ 处理超时（已超过 ${Math.round(timeout / 60000)} 分钟）`)
-      }, timeout)
+    let killTimer: ReturnType<typeof setTimeout> | null = null
+    const scheduleKill = (): void => {
+      if (killTimer) return
+      killTimer = setTimeout(() => {
+        try { proc.kill('SIGKILL') } catch { /* ignore */ }
+      }, 5000)
+    }
 
-      // Abort signal support (for cancellation)
-      if (signal) {
-        const onAbort = () => {
-          rootLogger.info({ component: `agent.${this.name}`, agent: this.name }, `[${this.name}] cancelled via signal`)
-          finalize(fullText ? fullText + '\n\n🚫 任务已被取消。' : '🚫 任务已被取消。')
-        }
-        if (signal.aborted) { onAbort(); return }
+    const onAbort = (): void => {
+      aborted = true
+      try { proc.kill('SIGTERM') } catch { /* ignore */ }
+      scheduleKill()
+      ping()
+    }
+    if (signal) {
+      if (signal.aborted) {
+        onAbort()
+      } else {
         signal.addEventListener('abort', onAbort, { once: true })
       }
+    }
 
-      proc.stdout?.on('data', (data: Buffer) => {
-        stdout += data.toString()
-        const lines = stdout.split('\n')
-        stdout = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line.trim()) continue
-          try {
-            const event = JSON.parse(line)
-            if (event.type === 'error') {
-              errorMessage = event.error || event.message || `${event.type} event`
-            }
-            const text = this.extractText(event)
-            if (text) fullText += text
-          } catch {
-            fullText += line + '\n'
+    proc.stdout?.on('data', (data: Buffer) => {
+      const lines = buf.push(data)
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          const event = JSON.parse(line)
+          if (event && typeof event === 'object' && (event as Record<string, unknown>).type === 'error') {
+            const e = event as Record<string, unknown>
+            errorMessage = (e.error as string) || (e.message as string) || 'error event'
+            // Don't yield error event content alongside extractText
+            continue
           }
+          const text = this.extractText(event)
+          if (text) pendingChunks.push(text)
+        } catch {
+          // Non-JSON line — pass through verbatim with newline preserved
+          pendingChunks.push(line + '\n')
         }
-      })
+      }
+      if (pendingChunks.length > 0) ping()
+    })
 
-      proc.stderr?.on('data', (data: Buffer) => {
-        stderr += data.toString()
-        console.error(`[${this.name} stderr]`, data.toString())
-      })
+    proc.stderr?.on('data', (data: Buffer) => {
+      stderrAccum += data.toString()
+      // Surface to root logger as warn — pino-aware, no console.error noise
+      for (const line of stderrBuf.push(data)) {
+        if (line.trim()) {
+          rootLogger.warn({ component: `agent.${this.name}`, agent: this.name, stderr: line }, `[${this.name}] stderr`)
+        }
+      }
+    })
 
-      proc.on('error', (err) => {
-        if (resolved) return
-        resolved = true
-        clearTimeout(timer)
-        reject(err)
-      })
+    proc.on('error', (err) => {
+      spawnError = err
+      closed = true
+      ping()
+    })
 
-      proc.on('close', (code) => {
-        if (resolved) return
-        resolved = true
-        clearTimeout(timer)
-        rootLogger.info({
-          component: `agent.${this.name}`,
-          agent: this.name,
-          exitCode: code,
-          responseLen: fullText.length,
-        }, `[${this.name}] process closed`)
+    proc.on('close', (code) => {
+      exitCode = code
+      closed = true
+      // Flush any remaining stderr line
+      for (const line of stderrBuf.flush()) {
+        if (line.trim()) {
+          rootLogger.warn({ component: `agent.${this.name}`, agent: this.name, stderr: line }, `[${this.name}] stderr`)
+        }
+      }
+      // Flush any non-newline-terminated tail in stdout buffer
+      for (const line of buf.flush()) {
+        try {
+          const event = JSON.parse(line)
+          const text = this.extractText(event)
+          if (text) pendingChunks.push(text)
+        } catch {
+          pendingChunks.push(line)
+        }
+      }
+      ping()
+    })
 
-        if (code !== 0) {
-          const friendlyError = this.handleError(code === null ? -1 : code, stderr, errorMessage)
-          if (friendlyError !== null) {
-            resolve(friendlyError)
-            return
-          }
-          let detail = ''
-          if (errorMessage) detail = errorMessage
-          if (!detail && stderr.trim() && stderr.trim().length < 200) detail = stderr.trim()
-          resolve(`${this.name} failed (exit ${code})${detail ? ': ' + detail : ''}`)
+    try {
+      while (!closed || pendingChunks.length > 0) {
+        if (pendingChunks.length === 0) {
+          await wait()
+          if (aborted) break
+          if (timedOut) break
+        }
+        // Drain whatever has accumulated this cycle
+        const out = pendingChunks
+        pendingChunks = []
+        for (const c of out) yield c
+      }
+
+      if (timedOut) {
+        const mins = Math.round(timeout / 60000)
+        rootLogger.warn({ component: `agent.${this.name}`, agent: this.name, timeoutMs: timeout },
+          `[${this.name}] timeout after ${mins}min`)
+        yield `\n\n⚠️ 处理超时（已超过 ${mins} 分钟）`
+        return
+      }
+
+      if (aborted) {
+        rootLogger.info({ component: `agent.${this.name}`, agent: this.name }, `[${this.name}] cancelled via signal`)
+        yield '\n\n🚫 任务已被取消。'
+        return
+      }
+
+      if (spawnError) {
+        throw spawnError
+      }
+
+      rootLogger.info({
+        component: `agent.${this.name}`,
+        agent: this.name,
+        exitCode,
+      }, `[${this.name}] process closed`)
+
+      if (exitCode !== null && exitCode !== 0) {
+        const friendly = this.handleError(exitCode, stderrAccum, errorMessage)
+        if (friendly !== null) {
+          yield friendly
           return
         }
-
-        resolve(fullText.trim())
-      })
-    })
+        let detail = ''
+        if (errorMessage) detail = errorMessage
+        if (!detail && stderrAccum.trim() && stderrAccum.trim().length < 200) {
+          detail = stderrAccum.trim()
+        }
+        yield `${this.name} failed (exit ${exitCode})${detail ? ': ' + detail : ''}`
+      }
+    } finally {
+      clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
+      if (signal) signal.removeEventListener('abort', onAbort)
+    }
   }
 }

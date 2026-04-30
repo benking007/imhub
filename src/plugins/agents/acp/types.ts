@@ -27,6 +27,14 @@ export interface ACPCreateTaskRequest {
     history?: Array<{ role: string; content: string }>
   }
   mode: 'sync' | 'stream'
+  /**
+   * Stable session identifier — passed through so the remote agent can
+   * thread context across multi-turn conversations. Not part of the
+   * upstream ACP spec yet; the remote may ignore it (the field is in
+   * the request body, not headers, so unknown-field-tolerant parsers
+   * pass it through fine).
+   */
+  session_id?: string
 }
 
 /** ACP Task response */
