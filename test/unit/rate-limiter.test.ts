@@ -50,4 +50,31 @@ describe('RateLimiter', () => {
     expect(s.intervalSec).toBe(30)
     expect(s.remaining).toBe(9)
   })
+
+  it('nextAllowAt returns now() when bucket has tokens', () => {
+    const rl = new RateLimiter(5, 60_000, 5)
+    const now = Date.now()
+    const next = rl.nextAllowAt('u')
+    expect(Math.abs(next - now)).toBeLessThan(50)
+  })
+
+  it('nextAllowAt advances by intervalMs once the bucket is drained', () => {
+    const rl = new RateLimiter(1, 1_000, 1)
+    rl.allow('u')
+    expect(rl.allow('u')).toBe(false)
+    const next = rl.nextAllowAt('u')
+    expect(next - Date.now()).toBeGreaterThan(500)
+    expect(next - Date.now()).toBeLessThanOrEqual(1_000)
+  })
+
+  it('cleanup drops idle buckets', async () => {
+    const rl = new RateLimiter(10, 60_000, 5)
+    rl.allow('a')
+    rl.allow('b')
+    await new Promise((r) => setTimeout(r, 30))
+    const dropped = rl.cleanup(20)
+    expect(dropped).toBe(2)
+    // After cleanup, remaining should reflect a fresh bucket.
+    expect(rl.remaining('a')).toBe(5)
+  })
 })

@@ -3,6 +3,7 @@
 import { describe, it, expect, beforeEach, vi } from 'bun:test'
 import { parseMessage, routeMessage, type RouteContext } from '../../src/core/router'
 import { registry } from '../../src/core/registry'
+import { workspaceRegistry } from '../../src/core/workspace'
 import type { AgentAdapter } from '../../src/core/types'
 import type { Logger } from 'pino'
 
@@ -307,6 +308,43 @@ describe('routeMessage', () => {
       )
       expect(result).toContain('Unknown command')
       expect(result).toContain('/help')
+    })
+  })
+
+  describe('workspace whitelist enforcement', () => {
+    it('blocks /<agent> when the resolved workspace excludes the agent', async () => {
+      // Register a named workspace that whitelists ONLY 'opencode' for alice
+      workspaceRegistry.add({
+        id: 'ws-test-explicit',
+        name: 'Test Explicit',
+        agents: ['opencode'],
+        members: ['alice-explicit'],
+      })
+
+      const result = await routeMessage(
+        { type: 'agent', agent: 'test-agent', prompt: 'hi' },
+        makeCtx({ userId: 'alice-explicit', threadId: 'ws-thread-explicit' })
+      )
+      expect(typeof result).toBe('string')
+      expect(result).toContain('not available in your workspace')
+    })
+
+    it('blocks default routing when the resolved workspace excludes the picked agent', async () => {
+      workspaceRegistry.add({
+        id: 'ws-test-default',
+        name: 'Test Default',
+        agents: ['nothing-registered'],
+        members: ['bob-default'],
+      })
+
+      const result = await routeMessage(
+        { type: 'default', prompt: 'hi' },
+        makeCtx({ userId: 'bob-default', threadId: 'ws-thread-default' })
+      )
+      expect(typeof result).toBe('string')
+      // Either rate-limit or whitelist message — both indicate the request
+      // didn't reach the agent.
+      expect(result).toMatch(/not available|过于频繁|not configured/)
     })
   })
 

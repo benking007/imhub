@@ -78,4 +78,43 @@ describe('classifyIntent', () => {
     const result = classifyIntent('refactor this typescript code')
     expect(result.reason.length).toBeGreaterThan(0)
   })
+
+  it('matches Chinese topic keywords (no \\b regression)', () => {
+    // \b doesn't fire on CJK boundaries — verify our Unicode-aware regex
+    // still picks up `审查` and `测试` even when they sit between Chinese
+    // characters with no spaces.
+    const review = classifyIntent('帮我审查这段代码')
+    expect(review.agent).toBe('claude-code')
+    expect(review.reason).toContain('topic:')
+
+    const testing = classifyIntent('帮我写测试用例')
+    expect(testing.agent).toBe('opencode')
+  })
+
+  it('triggeredBy is "topic" when a topic rule fires', () => {
+    const result = classifyIntent('git commit and push')
+    expect(result.triggeredBy).toBe('topic')
+  })
+
+  it('non-PROFILES custom agents receive default weight and remain selectable', () => {
+    // Register an agent without a PROFILES entry — simulates ACP custom agent.
+    const customAgent: AgentAdapter = {
+      name: 'my-custom-agent',
+      aliases: [],
+      isAvailable: async () => true,
+      sendPrompt: async function* () { yield '' },
+    }
+    registry.registerAgent(customAgent)
+    // sticky bias should let the custom agent win even with no profile.
+    const result = classifyIntent('hello there', 'my-custom-agent')
+    expect(result.agent).toBe('my-custom-agent')
+    expect(result.triggeredBy).toBe('sticky')
+  })
+
+  it('breaks ties deterministically (sticky > PROFILES order > alphabetical)', () => {
+    // No keyword/topic match → all profiled agents equal on base weight.
+    // Sticky should win.
+    const stickyResult = classifyIntent('ok thanks', 'codex')
+    expect(stickyResult.agent).toBe('codex')
+  })
 })

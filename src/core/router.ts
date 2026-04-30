@@ -32,6 +32,20 @@ export interface RouteContext {
 const AGENT_COMMANDS = new Set(['test', 'review', 'commit', 'push', 'diff', 'shell', 'bug', 'explain'])
 
 /**
+ * Build the rate-limit user-facing error string. Picks the effective
+ * limiter (workspace's own limiter for named workspaces, otherwise the
+ * shared userLimiter) so the wait estimate matches the bucket that
+ * actually rejected the request.
+ */
+function formatRateLimitError(ws: ReturnType<typeof workspaceRegistry.resolve>, key: string): string {
+  const limiter = ws.id === 'default' ? userLimiter : ws.limiter
+  const s = limiter.status(key)
+  const waitSec = Math.max(0, Math.ceil((limiter.nextAllowAt(key) - Date.now()) / 1000))
+  const tail = waitSec > 0 ? `，请在约 ${waitSec} 秒后重试` : ''
+  return `⏱️ 请求过于频繁（${s.rate} 次/${s.intervalSec}秒，剩余 ${s.remaining}）${tail}`
+}
+
+/**
  * Parse a message to determine how to route it
  *
  * Command format: /alias prompt... or /agent-name prompt...
@@ -118,6 +132,24 @@ export async function routeMessage(
         return `❌ Agent "${parsed.agent}" not found. Use /agents to see available agents.`
       }
 
+      // Workspace whitelist must apply to explicit /<agent> too — otherwise
+      // a named workspace with `agents: ['oc']` cannot stop a member from
+      // bypassing it via /cc directly.
+      const wsAgent = workspaceRegistry.resolve(ctx.userId || 'unknown')
+      if (!wsAgent.hasAgent(agent.name)) {
+        return `🚫 Agent "${agent.name}" is not available in your workspace.\n\nTry /agents to see available agents.`
+      }
+
+      // Per-workspace rate limit (falls back to userLimiter for default
+      // workspace which has no explicit limiter override).
+      const limitKeyAgent = `${ctx.platform}:${ctx.userId || 'unknown'}`
+      const allowedAgent = wsAgent.id === 'default'
+        ? userLimiter.allow(limitKeyAgent)
+        : wsAgent.allow(limitKeyAgent)
+      if (!allowedAgent) {
+        return formatRateLimitError(wsAgent, limitKeyAgent)
+      }
+
       if (circuitBreaker.isOpen(agent.name)) {
         return `⛔ ${agent.name} is temporarily unavailable (too many consecutive failures). Try again in a few minutes, or use another agent.`
       }
@@ -143,11 +175,15 @@ export async function routeMessage(
     }
 
     case 'default': {
-      // Rate limit check (per user)
+      // Resolve workspace upfront so rate-limit & whitelist share the same
+      // tenant context.
+      const ws = workspaceRegistry.resolve(ctx.userId || 'unknown')
       const limitKey = `${ctx.platform}:${ctx.userId || 'unknown'}`
-      if (!userLimiter.allow(limitKey)) {
-        const s = userLimiter.status(limitKey)
-        return `⏱️ 请求过于频繁，请稍后再试。（${s.rate} 次/${s.intervalSec}秒，当前剩余 ${s.remaining}）`
+      const allowed = ws.id === 'default'
+        ? userLimiter.allow(limitKey)
+        : ws.allow(limitKey)
+      if (!allowed) {
+        return formatRateLimitError(ws, limitKey)
       }
 
       const existingSession = await sessionManager.getExistingSession(ctx.platform, ctx.channelId, ctx.threadId)
@@ -201,8 +237,8 @@ export async function routeMessage(
         return `⛔ ${agent.name} is temporarily unavailable (circuit breaker open).\nCurrently blocked: ${openAgents || 'none'}\n\nTry /agents to see available agents, or wait a few minutes.`
       }
 
-      // Workspace agent whitelist check
-      const ws = workspaceRegistry.resolve(ctx.userId || 'unknown')
+      // Workspace already resolved above — check the whitelist before
+      // exposing the agent to the message.
       if (!ws.hasAgent(agent.name)) {
         return `🚫 Agent "${agent.name}" is not available in your workspace.\n\nTry /agents to see available agents.`
       }
