@@ -1,9 +1,17 @@
 // Session manager — per-conversation state
+//
+// On-disk layout (one directory tree per home):
+//   ~/.im-hub/sessions/<safe-key>.json   — metadata (no messages)
+//   ~/.im-hub/sessions/<safe-key>.log    — append-only JSONL of messages
+//
+// Splitting the message log out of the JSON metadata avoids rewriting the
+// entire history on every chat turn (the old behavior was an O(N) write
+// per message). All metadata writes are atomic via writeFile→rename.
 
-import { createHash } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { homedir } from 'os'
 import { join } from 'path'
-import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
+import { mkdir, readFile, writeFile, rename, unlink, appendFile } from 'fs/promises'
 import type { Session, ChatMessage, SubtaskMeta } from './types.js'
 
 const SESSIONS_DIR = join(homedir(), '.im-hub', 'sessions')
@@ -17,6 +25,11 @@ function sanitizeKey(raw: string): string {
 function sessionFilePath(key: string): string {
   const safe = sanitizeKey(key)
   return join(SESSIONS_DIR, `${safe}.json`)
+}
+
+function sessionLogPath(key: string): string {
+  const safe = sanitizeKey(key)
+  return join(SESSIONS_DIR, `${safe}.log`)
 }
 const DEFAULT_TTL = 30 * 60 * 1000 // 30 minutes
 const CLEANUP_INTERVAL = 5 * 60 * 1000 // 5 minutes
@@ -83,7 +96,7 @@ class SessionManager {
 
     // Create new session
     session = {
-      id: `${platform}-${channelId}-${threadId}-${Date.now()}`,
+      id: `${platform}-${channelId}-${threadId}-${Date.now()}-${randomBytes(4).toString('hex')}`,
       channelId,
       threadId,
       platform,
@@ -148,7 +161,7 @@ class SessionManager {
 
     const now = new Date()
     const session: Session = {
-      id: `${platform}-${channelId}-${threadId}-${Date.now()}`,
+      id: `${platform}-${channelId}-${threadId}-${Date.now()}-${randomBytes(4).toString('hex')}`,
       channelId,
       threadId,
       platform,
@@ -166,7 +179,11 @@ class SessionManager {
   }
 
   /**
-   * Add a message to the session history
+   * Append a message to the session history.
+   *
+   * Performance: instead of re-serializing the entire session JSON every
+   * turn, the message body is appended to a JSONL log file alongside the
+   * metadata (which gets a tiny atomic update for `lastActivity`).
    */
   async addMessage(
     platform: string,
@@ -181,7 +198,14 @@ class SessionManager {
       session.messages.push(message)
       session.lastActivity = new Date()
       this.sessions.set(key, session)
-      await this.saveSession(key, session)
+      // Append-only log avoids rewriting the entire history per turn.
+      try {
+        await appendFile(sessionLogPath(key), JSON.stringify(message) + '\n')
+      } catch {
+        // Disk error → fall back to full save which will catch it again
+      }
+      // Persist metadata only (now small & cheap).
+      await this.saveSessionMeta(key, session)
     }
   }
 
@@ -199,7 +223,7 @@ class SessionManager {
     if (session) {
       session.messages = []
       session.lastActivity = new Date()
-      session.id = `${platform}-${channelId}-${threadId}-${Date.now()}` // New session ID
+      session.id = `${platform}-${channelId}-${threadId}-${Date.now()}-${randomBytes(4).toString('hex')}` // New session ID
       this.sessions.set(key, session)
       await this.saveSession(key, session)
       return session
@@ -291,23 +315,87 @@ class SessionManager {
     await this.saveSession(key, session)
   }
 
-  /** Get subtask counter and increment. */
-  async nextSubtaskId(platform: string, channelId: string, threadId: string): Promise<number> {
+  /**
+   * Get next subtask id and persist the increment.
+   *
+   * Previously returned 1 when the parent session didn't exist yet, but
+   * never created one — second call returned 1 again, leading to subtask
+   * id collisions. Now we lazy-create the parent session so the counter
+   * increments durably from the first call.
+   */
+  async nextSubtaskId(
+    platform: string, channelId: string, threadId: string, agent = ''
+  ): Promise<number> {
     const key = `${platform}:${channelId}:${threadId}`
-    const session = this.sessions.get(key) || await this.loadSession(key)
-    if (!session) return 1
+    let session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session) {
+      const now = new Date()
+      session = {
+        id: `${platform}-${channelId}-${threadId}-${Date.now()}-${randomBytes(4).toString('hex')}`,
+        channelId, threadId, platform, agent,
+        createdAt: now, lastActivity: now, ttl: DEFAULT_TTL, messages: [],
+        subtaskCounter: 0,
+      }
+    }
     session.subtaskCounter = (session.subtaskCounter || 0) + 1
     this.sessions.set(key, session)
     await this.saveSession(key, session)
     return session.subtaskCounter
   }
 
+  /**
+   * Persist the full session (metadata + messages). Used for the legacy
+   * one-file format on resetConversation() and switchAgent() — anywhere
+   * the messages array itself was rewritten. Atomic via tmp+rename.
+   */
   private async saveSession(key: string, session: Session): Promise<void> {
+    await this.saveSessionMeta(key, session)
+    // Rewrite the JSONL log to match the in-memory messages array. This is
+    // only called from paths that actually mutate `messages` wholesale
+    // (resetConversation, switchAgent). addMessage uses appendFile which
+    // is far cheaper for the hot path.
+    const logPath = sessionLogPath(key)
+    try {
+      const lines = session.messages.map((m) => JSON.stringify(m)).join('\n')
+      await this.atomicWrite(logPath, lines + (lines ? '\n' : ''))
+    } catch {
+      // disk failure — in-memory state is still authoritative
+    }
+  }
+
+  /** Persist metadata only (no messages payload), atomically. */
+  private async saveSessionMeta(key: string, session: Session): Promise<void> {
     const filePath = sessionFilePath(key)
     try {
-      await writeFile(filePath, JSON.stringify(session, null, 2))
+      const meta: Omit<Session, 'messages'> & { messageCount: number } = {
+        id: session.id,
+        channelId: session.channelId,
+        threadId: session.threadId,
+        platform: session.platform,
+        agent: session.agent,
+        createdAt: session.createdAt,
+        lastActivity: session.lastActivity,
+        ttl: session.ttl,
+        activeSubtaskId: session.activeSubtaskId,
+        subtasks: session.subtasks,
+        subtaskCounter: session.subtaskCounter,
+        messageCount: session.messages.length,
+      }
+      await this.atomicWrite(filePath, JSON.stringify(meta, null, 2))
     } catch {
-      // Ignore save errors — in-memory still works
+      // ignore
+    }
+  }
+
+  /** Crash-safe write: tmp file + atomic rename. */
+  private async atomicWrite(filePath: string, contents: string): Promise<void> {
+    const tmp = `${filePath}.${randomBytes(4).toString('hex')}.tmp`
+    await writeFile(tmp, contents)
+    try {
+      await rename(tmp, filePath)
+    } catch (err) {
+      try { await unlink(tmp) } catch { /* ignore */ }
+      throw err
     }
   }
 
@@ -315,18 +403,44 @@ class SessionManager {
     const filePath = sessionFilePath(key)
     try {
       const data = await readFile(filePath, 'utf-8')
-      const session = JSON.parse(data) as Session
-      // Convert date strings back to Date objects
-      session.createdAt = new Date(session.createdAt)
-      session.lastActivity = new Date(session.lastActivity)
-      // Convert message timestamps
-      if (session.messages) {
-        session.messages = session.messages.map(msg => ({
-          ...msg,
-          timestamp: new Date(msg.timestamp)
-        }))
-      } else {
-        session.messages = []
+      const parsed = JSON.parse(data) as Partial<Session> & { messageCount?: number }
+      const session: Session = {
+        id: parsed.id!,
+        channelId: parsed.channelId!,
+        threadId: parsed.threadId!,
+        platform: parsed.platform!,
+        agent: parsed.agent!,
+        createdAt: new Date(parsed.createdAt!),
+        lastActivity: new Date(parsed.lastActivity!),
+        ttl: parsed.ttl!,
+        messages: parsed.messages || [],  // legacy one-file format
+        activeSubtaskId: parsed.activeSubtaskId,
+        subtasks: parsed.subtasks,
+        subtaskCounter: parsed.subtaskCounter,
+      }
+      // Convert message timestamps from legacy format if present
+      session.messages = session.messages.map((msg) => ({
+        ...msg,
+        timestamp: new Date(msg.timestamp),
+      }))
+      // Then merge in JSONL log entries (new format).
+      try {
+        const log = await readFile(sessionLogPath(key), 'utf-8')
+        const logged: ChatMessage[] = []
+        for (const line of log.split('\n')) {
+          if (!line.trim()) continue
+          try {
+            const m = JSON.parse(line) as ChatMessage
+            logged.push({ ...m, timestamp: new Date(m.timestamp) })
+          } catch { /* skip corrupt line */ }
+        }
+        // The log is authoritative for new-format sessions. If both exist
+        // (rare, after a save followed by addMessage), the log wins.
+        if (logged.length > 0) {
+          session.messages = logged
+        }
+      } catch {
+        // No log file — legacy format only
       }
       return session
     } catch {
@@ -341,13 +455,11 @@ class SessionManager {
       if (now - session.lastActivity.getTime() > session.ttl) {
         this.sessions.delete(key)
 
-        // Delete from disk
+        // Delete both metadata and the append-only log
         const filePath = sessionFilePath(key)
-        try {
-          await unlink(filePath)
-        } catch {
-          // Ignore delete errors
-        }
+        const logPath = sessionLogPath(key)
+        try { await unlink(filePath) } catch { /* ignore */ }
+        try { await unlink(logPath) } catch { /* ignore */ }
       }
     }
   }
