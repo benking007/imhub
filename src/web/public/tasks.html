@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>im-hub — Tasks</title>
+  <script>
+    const LANGS = { en: 'English', zh: '中文' };
+    const savedLang = localStorage.getItem('im-hub-lang');
+    const browserLang = navigator.language.startsWith('zh') ? 'zh' : 'en';
+    window.__lang = savedLang && LANGS[savedLang] ? savedLang : browserLang;
+    document.documentElement.lang = window.__lang === 'zh' ? 'zh-CN' : 'en';
+
+    const T = {
+      en: {
+        title: 'im-hub — Tasks',
+        h1: 'Tasks & Schedules',
+        backToChat: 'Chat',
+        toSettings: 'Settings',
+        tabsJobs: 'Jobs',
+        tabsSchedules: 'Schedules',
+        loading: 'Loading...',
+        statsTotal: 'Total',
+        statsPending: 'Pending',
+        statsRunning: 'Running',
+        statsCompleted: 'Completed',
+        statsFailed: 'Failed',
+        filterAll: 'All',
+        filterPending: 'Pending',
+        filterRunning: 'Running',
+        filterCompleted: 'Completed',
+        filterFailed: 'Failed',
+        filterCancelled: 'Cancelled',
+        refresh: 'Refresh',
+        autoRefresh: 'Auto-refresh',
+        newJob: 'New Job',
+        agent: 'Agent',
+        prompt: 'Prompt',
+        status: 'Status',
+        created: 'Created',
+        completed: 'Completed',
+        actions: 'Actions',
+        view: 'View',
+        run: 'Run',
+        cancel: 'Cancel',
+        details: 'Details',
+        result: 'Result',
+        error: 'Error',
+        close: 'Close',
+        empty: 'No tasks. Create one with /job create or via the New Job button.',
+        emptySchedules: 'No schedules. Create one in IM with /schedule create.',
+        scheduleName: 'Name',
+        scheduleCron: 'Cron',
+        scheduleNext: 'Next run',
+        scheduleLast: 'Last run',
+        promptCreate: 'Prompt for the new job',
+        agentCreate: 'Agent (defaults to claude-code)',
+      },
+      zh: {
+        title: 'im-hub — 任务',
+        h1: '任务与定时',
+        backToChat: '对话',
+        toSettings: '设置',
+        tabsJobs: '任务',
+        tabsSchedules: '定时',
+        loading: '加载中...',
+        statsTotal: '总计',
+        statsPending: '待执行',
+        statsRunning: '运行中',
+        statsCompleted: '已完成',
+        statsFailed: '失败',
+        filterAll: '全部',
+        filterPending: '待执行',
+        filterRunning: '运行中',
+        filterCompleted: '已完成',
+        filterFailed: '失败',
+        filterCancelled: '已取消',
+        refresh: '刷新',
+        autoRefresh: '自动刷新',
+        newJob: '新建任务',
+        agent: 'Agent',
+        prompt: '内容',
+        status: '状态',
+        created: '创建',
+        completed: '完成',
+        actions: '操作',
+        view: '查看',
+        run: '运行',
+        cancel: '取消',
+        details: '详情',
+        result: '结果',
+        error: '错误',
+        close: '关闭',
+        empty: '暂无任务。可在 IM 内 /job create 或点"新建任务"。',
+        emptySchedules: '暂无定时任务。在 IM 内 /schedule create 创建。',
+        scheduleName: '名称',
+        scheduleCron: 'Cron',
+        scheduleNext: '下次',
+        scheduleLast: '上次',
+        promptCreate: '输入任务内容',
+        agentCreate: 'Agent (默认 claude-code)',
+      },
+    };
+    window.__t = T[window.__lang];
+  </script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #fafafa;
+      --fg: #222;
+      --muted: #666;
+      --border: #ddd;
+      --primary: #0066cc;
+      --success: #28a745;
+      --warning: #ffc107;
+      --danger: #dc3545;
+      --info: #17a2b8;
+      --card: #fff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e0e10;
+        --fg: #e6e6e6;
+        --muted: #888;
+        --border: #2a2a2e;
+        --card: #1a1a1d;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      font-size: 14px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--card);
+    }
+    header h1 { margin: 0; font-size: 18px; flex: 1; }
+    header a, header button {
+      color: var(--primary);
+      text-decoration: none;
+      font-size: 14px;
+      background: none;
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    header a:hover, header button:hover { border-color: var(--primary); }
+    main { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+    .tab {
+      padding: 8px 16px;
+      cursor: pointer;
+      border: none;
+      background: none;
+      color: var(--muted);
+      font-size: 14px;
+      border-bottom: 2px solid transparent;
+    }
+    .tab.active { color: var(--fg); border-bottom-color: var(--primary); }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .stat {
+      background: var(--card);
+      padding: 12px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+    .stat-label { color: var(--muted); font-size: 12px; }
+    .stat-val { font-size: 22px; font-weight: 600; margin-top: 4px; }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .toolbar select, .toolbar button, .toolbar label {
+      font-size: 13px;
+      padding: 5px 10px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--fg);
+      border-radius: 4px;
+    }
+    .toolbar button { cursor: pointer; }
+    .toolbar button.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .toolbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--card);
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      font-size: 13px;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      background: var(--bg);
+      color: var(--muted);
+      font-weight: 500;
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .pill.pending { background: rgba(255, 193, 7, 0.18); color: #b89000; }
+    .pill.running { background: rgba(23, 162, 184, 0.18); color: #0d8898; }
+    .pill.completed { background: rgba(40, 167, 69, 0.18); color: #1e7c34; }
+    .pill.failed { background: rgba(220, 53, 69, 0.18); color: #b32433; }
+    .pill.cancelled { background: rgba(108, 117, 125, 0.18); color: #5a6268; }
+    .row-actions button {
+      font-size: 12px;
+      padding: 3px 8px;
+      margin-right: 4px;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--fg);
+      border-radius: 4px;
+    }
+    .row-actions button:hover { border-color: var(--primary); color: var(--primary); }
+    .row-actions button.danger:hover { border-color: var(--danger); color: var(--danger); }
+    .empty { text-align: center; padding: 40px; color: var(--muted); }
+    .modal-bg {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.5);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .modal-bg.show { display: flex; }
+    .modal {
+      background: var(--card);
+      border-radius: 8px;
+      padding: 20px;
+      max-width: 720px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .modal h2 { margin-top: 0; }
+    .modal pre {
+      background: var(--bg);
+      padding: 12px;
+      border-radius: 6px;
+      overflow-x: auto;
+      max-height: 400px;
+      white-space: pre-wrap;
+      font-size: 12px;
+    }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .modal input, .modal textarea, .modal select {
+      width: 100%;
+      padding: 8px;
+      margin: 4px 0 12px;
+      background: var(--bg);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font: inherit;
+    }
+    .modal textarea { min-height: 100px; resize: vertical; }
+    code { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; }
+    .truncate { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 id="page-title"></h1>
+    <a href="/">↩ <span id="lbl-chat"></span></a>
+    <a href="/settings"><span id="lbl-settings"></span></a>
+  </header>
+  <main>
+    <div class="tabs">
+      <button class="tab active" data-tab="jobs" id="tab-jobs"></button>
+      <button class="tab" data-tab="schedules" id="tab-schedules"></button>
+    </div>
+
+    <section id="jobs-pane">
+      <div class="stats" id="stats"></div>
+      <div class="toolbar">
+        <select id="filter-status">
+          <option value=""></option>
+          <option value="pending"></option>
+          <option value="running"></option>
+          <option value="completed"></option>
+          <option value="failed"></option>
+          <option value="cancelled"></option>
+        </select>
+        <button id="btn-refresh"></button>
+        <label><input type="checkbox" id="auto-refresh" checked> <span id="lbl-auto"></span></label>
+        <button id="btn-new" class="primary"></button>
+      </div>
+      <div id="jobs-list"></div>
+    </section>
+
+    <section id="schedules-pane" hidden>
+      <div id="schedules-list"></div>
+    </section>
+  </main>
+
+  <div class="modal-bg" id="modal-bg">
+    <div class="modal" id="modal"></div>
+  </div>
+
+  <script>
+    const T = window.__t;
+    const TOKEN = window.IMHUB_TOKEN;
+
+    // i18n string fills
+    document.title = T.title;
+    document.getElementById('page-title').textContent = T.h1;
+    document.getElementById('lbl-chat').textContent = T.backToChat;
+    document.getElementById('lbl-settings').textContent = T.toSettings;
+    document.getElementById('tab-jobs').textContent = T.tabsJobs;
+    document.getElementById('tab-schedules').textContent = T.tabsSchedules;
+    document.getElementById('btn-refresh').textContent = T.refresh;
+    document.getElementById('btn-new').textContent = T.newJob;
+    document.getElementById('lbl-auto').textContent = T.autoRefresh;
+    {
+      const fs = document.getElementById('filter-status');
+      fs.options[0].textContent = T.filterAll;
+      fs.options[1].textContent = T.filterPending;
+      fs.options[2].textContent = T.filterRunning;
+      fs.options[3].textContent = T.filterCompleted;
+      fs.options[4].textContent = T.filterFailed;
+      fs.options[5].textContent = T.filterCancelled;
+    }
+
+    // Tab switching
+    document.querySelectorAll('.tab').forEach(t => {
+      t.onclick = () => {
+        document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+        const tab = t.dataset.tab;
+        document.getElementById('jobs-pane').hidden = tab !== 'jobs';
+        document.getElementById('schedules-pane').hidden = tab !== 'schedules';
+        if (tab === 'schedules') loadSchedules();
+      };
+    });
+
+    // API helper
+    async function api(path, init) {
+      const res = await fetch(path, {
+        ...init,
+        headers: { 'X-IM-Hub-Token': TOKEN, 'Content-Type': 'application/json', ...(init && init.headers) },
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json();
+    }
+
+    function fmtTime(s) {
+      if (!s) return '-';
+      const d = new Date(s.endsWith('Z') ? s : s + 'Z');
+      return d.toLocaleString();
+    }
+
+    function statusPill(status) {
+      return `<span class="pill ${status}">${T['filter' + status.charAt(0).toUpperCase() + status.slice(1)] || status}</span>`;
+    }
+
+    function renderStats(stats) {
+      const el = document.getElementById('stats');
+      const fields = [
+        ['Total', stats.total],
+        ['Pending', stats.pending],
+        ['Running', stats.running],
+        ['Completed', stats.completed],
+        ['Failed', stats.failed],
+      ];
+      el.innerHTML = fields.map(([k, v]) =>
+        `<div class="stat"><div class="stat-label">${T['stats' + k]}</div><div class="stat-val">${v}</div></div>`
+      ).join('');
+    }
+
+    function renderJobs(jobs) {
+      const el = document.getElementById('jobs-list');
+      if (!jobs.length) { el.innerHTML = `<div class="empty">${T.empty}</div>`; return; }
+      el.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>${T.agent}</th>
+              <th>${T.prompt}</th>
+              <th>${T.status}</th>
+              <th>${T.created}</th>
+              <th>${T.actions}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${jobs.map(j => `
+              <tr data-id="${j.id}">
+                <td>#${j.id}</td>
+                <td><code>${j.agent}</code></td>
+                <td class="truncate">${esc(j.prompt)}</td>
+                <td>${statusPill(j.status)}</td>
+                <td>${fmtTime(j.created_at)}</td>
+                <td class="row-actions">
+                  <button data-act="view">${T.view}</button>
+                  ${j.status === 'pending' || j.status === 'completed' || j.status === 'failed'
+                    ? `<button data-act="run">${T.run}</button>` : ''}
+                  ${j.status === 'pending' || j.status === 'running'
+                    ? `<button data-act="cancel" class="danger">${T.cancel}</button>` : ''}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+      el.querySelectorAll('tr[data-id]').forEach(tr => {
+        const id = parseInt(tr.dataset.id, 10);
+        tr.querySelector('[data-act="view"]')?.addEventListener('click', () => showJob(id));
+        tr.querySelector('[data-act="run"]')?.addEventListener('click', () => runJob(id));
+        tr.querySelector('[data-act="cancel"]')?.addEventListener('click', () => cancelJob(id));
+      });
+    }
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+    }
+
+    async function loadJobs() {
+      const status = document.getElementById('filter-status').value;
+      const params = status ? `?status=${status}&limit=100` : '?limit=100';
+      try {
+        const { jobs, stats } = await api('/api/jobs' + params);
+        renderStats(stats);
+        renderJobs(jobs);
+      } catch (e) {
+        document.getElementById('jobs-list').innerHTML =
+          `<div class="empty">${T.error}: ${e.message}</div>`;
+      }
+    }
+
+    async function showJob(id) {
+      const { job } = await api('/api/jobs/' + id);
+      const m = document.getElementById('modal');
+      m.innerHTML = `
+        <h2>${T.details} #${job.id}</h2>
+        <p><strong>${T.agent}:</strong> <code>${job.agent}</code> · <strong>${T.status}:</strong> ${statusPill(job.status)}</p>
+        <p><strong>${T.created}:</strong> ${fmtTime(job.created_at)}${job.completed_at ? ` · <strong>${T.completed}:</strong> ${fmtTime(job.completed_at)}` : ''}</p>
+        <h3>${T.prompt}</h3>
+        <pre>${esc(job.prompt)}</pre>
+        ${job.result ? `<h3>${T.result}</h3><pre>${esc(job.result)}</pre>` : ''}
+        ${job.error ? `<h3>${T.error}</h3><pre>${esc(job.error)}</pre>` : ''}
+        <div class="modal-actions">
+          <button id="modal-close">${T.close}</button>
+        </div>
+      `;
+      document.getElementById('modal-bg').classList.add('show');
+      document.getElementById('modal-close').onclick = () =>
+        document.getElementById('modal-bg').classList.remove('show');
+    }
+
+    async function runJob(id) {
+      await api('/api/jobs/' + id + '/run', { method: 'POST' });
+      loadJobs();
+    }
+
+    async function cancelJob(id) {
+      await api('/api/jobs/' + id + '/cancel', { method: 'POST' });
+      loadJobs();
+    }
+
+    // New job modal
+    document.getElementById('btn-new').onclick = async () => {
+      const agentsRes = await fetch('/api/agents/status', {
+        headers: { 'X-IM-Hub-Token': TOKEN },
+      }).then(r => r.json());
+      const agents = Object.keys(agentsRes);
+
+      const m = document.getElementById('modal');
+      m.innerHTML = `
+        <h2>${T.newJob}</h2>
+        <label>${T.agentCreate}<select id="ji-agent">
+          ${agents.map(a => `<option value="${a}">${a}</option>`).join('')}
+        </select></label>
+        <label>${T.promptCreate}<textarea id="ji-prompt"></textarea></label>
+        <div class="modal-actions">
+          <button id="modal-close">${T.close}</button>
+          <button class="primary" id="modal-create" style="background:var(--primary);color:#fff;border-color:var(--primary);">${T.newJob}</button>
+        </div>
+      `;
+      document.getElementById('modal-bg').classList.add('show');
+      document.getElementById('modal-close').onclick = () =>
+        document.getElementById('modal-bg').classList.remove('show');
+      document.getElementById('modal-create').onclick = async () => {
+        const agent = document.getElementById('ji-agent').value;
+        const prompt = document.getElementById('ji-prompt').value.trim();
+        if (!prompt) return;
+        await api('/api/jobs', { method: 'POST', body: JSON.stringify({ agent, prompt }) });
+        document.getElementById('modal-bg').classList.remove('show');
+        loadJobs();
+      };
+    };
+
+    document.getElementById('btn-refresh').onclick = loadJobs;
+    document.getElementById('filter-status').onchange = loadJobs;
+
+    // Auto-refresh every 5s when checkbox is on
+    let timer = null;
+    function setupAutoRefresh() {
+      const on = document.getElementById('auto-refresh').checked;
+      if (timer) { clearInterval(timer); timer = null; }
+      if (on) timer = setInterval(loadJobs, 5000);
+    }
+    document.getElementById('auto-refresh').onchange = setupAutoRefresh;
+    setupAutoRefresh();
+
+    // Schedules tab
+    async function loadSchedules() {
+      const el = document.getElementById('schedules-list');
+      el.innerHTML = `<div class="empty">${T.loading}</div>`;
+      try {
+        const { schedules } = await api('/api/schedules');
+        if (!schedules.length) { el.innerHTML = `<div class="empty">${T.emptySchedules}</div>`; return; }
+        el.innerHTML = `
+          <table>
+            <thead><tr>
+              <th>#</th><th>${T.scheduleName}</th><th>${T.agent}</th><th>${T.scheduleCron}</th>
+              <th>${T.status}</th><th>${T.scheduleNext}</th><th>${T.scheduleLast}</th>
+            </tr></thead>
+            <tbody>
+              ${schedules.map(s => `
+                <tr>
+                  <td>#${s.id}</td>
+                  <td>${esc(s.name)}</td>
+                  <td><code>${s.agent}</code></td>
+                  <td><code>${esc(s.cron)}</code></td>
+                  <td>${s.enabled ? '✅' : '⏸️'}</td>
+                  <td>${fmtTime(s.next_run)}</td>
+                  <td>${fmtTime(s.last_run)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      } catch (e) {
+        el.innerHTML = `<div class="empty">${T.error}: ${e.message}</div>`;
+      }
+    }
+
+    // Initial load
+    loadJobs();
+  </script>
+</body>
+</html>

@@ -75,6 +75,9 @@ export async function startWebServer(options: {
     if (url.pathname === '/settings' || url.pathname === '/settings.html') {
       return serveIndexHtml(res, join(PUBLIC_DIR, 'settings.html'), webToken)
     }
+    if (url.pathname === '/tasks' || url.pathname === '/tasks.html') {
+      return serveIndexHtml(res, join(PUBLIC_DIR, 'tasks.html'), webToken)
+    }
 
     // REST API — require auth token
     if (url.pathname.startsWith('/api/')) {
@@ -101,6 +104,31 @@ export async function startWebServer(options: {
     }
     if (url.pathname === '/api/agents/acp/discover' && req.method === 'POST') {
       return handleAcpDiscover(req, res)
+    }
+
+    // Jobs
+    if (url.pathname === '/api/jobs' && req.method === 'GET') {
+      return handleListJobs(req, res, url)
+    }
+    const jobIdMatch = url.pathname.match(/^\/api\/jobs\/(\d+)$/)
+    if (jobIdMatch && req.method === 'GET') {
+      return handleGetJob(req, res, parseInt(jobIdMatch[1], 10))
+    }
+    const jobCancelMatch = url.pathname.match(/^\/api\/jobs\/(\d+)\/cancel$/)
+    if (jobCancelMatch && req.method === 'POST') {
+      return handleCancelJob(req, res, parseInt(jobCancelMatch[1], 10))
+    }
+    const jobRunMatch = url.pathname.match(/^\/api\/jobs\/(\d+)\/run$/)
+    if (jobRunMatch && req.method === 'POST') {
+      return handleRunJob(req, res, parseInt(jobRunMatch[1], 10))
+    }
+    if (url.pathname === '/api/jobs' && req.method === 'POST') {
+      return handleCreateJob(req, res)
+    }
+
+    // Schedules
+    if (url.pathname === '/api/schedules' && req.method === 'GET') {
+      return handleListSchedules(req, res)
     }
     if (url.pathname === '/api/workspaces' && req.method === 'GET') {
       return handleListWorkspaces(req, res)
@@ -440,6 +468,100 @@ async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     sendJson(res, 500, { ok: false, error: msg })
+  }
+}
+
+async function handleListJobs(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  try {
+    const { listJobs, getJobStats } = await import('../core/job-board.js')
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 500)
+    const status = url.searchParams.get('status') as 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | null
+    const jobs = listJobs(limit, status || undefined)
+    const stats = getJobStats()
+    sendJson(res, 200, { jobs, stats })
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+async function handleGetJob(_req: IncomingMessage, res: ServerResponse, id: number): Promise<void> {
+  try {
+    const { getJob } = await import('../core/job-board.js')
+    const job = getJob(id)
+    if (!job) { sendJson(res, 404, { error: 'Job not found' }); return }
+    sendJson(res, 200, { job })
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+async function handleCancelJob(_req: IncomingMessage, res: ServerResponse, id: number): Promise<void> {
+  try {
+    const { cancelJob } = await import('../core/job-board.js')
+    sendJson(res, 200, { ok: cancelJob(id) })
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+async function handleRunJob(req: IncomingMessage, res: ServerResponse, id: number): Promise<void> {
+  try {
+    const { getJob, runJob } = await import('../core/job-board.js')
+    const { AgentBase } = await import('../core/agent-base.js')
+    const job = getJob(id)
+    if (!job) { sendJson(res, 404, { error: 'Job not found' }); return }
+    const agent = registry.findAgent(job.agent)
+    if (!agent) { sendJson(res, 404, { error: `Agent "${job.agent}" not registered` }); return }
+
+    const traceId = generateTraceId()
+    const log = createLogger({ traceId, platform: 'web', component: 'job-run' })
+    // Fire and forget — UI polls /api/jobs/:id for status.
+    void runJob(id, async function* (j, _logger, signal) {
+      if (agent instanceof AgentBase) {
+        const text = await agent.spawnAndCollect(j.prompt, signal)
+        if (text) yield text
+      } else {
+        for await (const chunk of agent.sendPrompt(`web-job-${j.id}`, j.prompt, [])) {
+          if (signal.aborted) break
+          yield chunk
+        }
+      }
+    }, log).catch(() => { /* job-board logs */ })
+
+    sendJson(res, 200, { ok: true, traceId })
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+async function handleCreateJob(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req, res)
+    const { agent, prompt } = JSON.parse(body) as { agent?: string; prompt?: string }
+    if (!agent || !prompt) {
+      sendJson(res, 400, { error: 'Missing agent / prompt' })
+      return
+    }
+    if (!registry.findAgent(agent)) {
+      sendJson(res, 404, { error: `Agent "${agent}" not registered` })
+      return
+    }
+    const { createJob } = await import('../core/job-board.js')
+    const id = createJob(agent, prompt)
+    sendJson(res, 200, { ok: true, id })
+  } catch (err) {
+    const e = err as Error & { handled?: boolean; statusCode?: number }
+    if (e?.handled) return
+    if (!res.headersSent) sendJson(res, e?.statusCode || 500, { error: e instanceof Error ? e.message : String(err) })
+  }
+}
+
+async function handleListSchedules(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const { listSchedules } = await import('../core/schedule.js')
+    sendJson(res, 200, { schedules: listSchedules() })
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
   }
 }
 

@@ -196,4 +196,75 @@ describe('Web REST API', () => {
       expect([200, 500]).toContain(res.status)
     })
   })
+
+  describe('Jobs API (W-1)', () => {
+    it('GET /api/jobs returns shape under SQLite-degraded bun', async () => {
+      const res = await fetch(url('/api/jobs'), { headers: auth })
+      expect(res.status).toBe(200)
+      const body = await res.json() as { jobs: unknown[]; stats: { total: number } }
+      expect(Array.isArray(body.jobs)).toBe(true)
+      expect(typeof body.stats.total).toBe('number')
+    })
+
+    it('GET /api/jobs?status=pending&limit=10 accepts filters', async () => {
+      const res = await fetch(url('/api/jobs?status=pending&limit=10'), { headers: auth })
+      expect(res.status).toBe(200)
+    })
+
+    it('GET /api/jobs/:id returns 404 for unknown id', async () => {
+      const res = await fetch(url('/api/jobs/999999999'), { headers: auth })
+      expect(res.status).toBe(404)
+    })
+
+    it('POST /api/jobs/:id/cancel returns 200 with ok flag', async () => {
+      const res = await fetch(url('/api/jobs/999999999/cancel'), {
+        method: 'POST', headers: auth,
+      })
+      expect(res.status).toBe(200)
+      const body = await res.json() as { ok: boolean }
+      expect(typeof body.ok).toBe('boolean')
+    })
+
+    it('POST /api/jobs/:id/run on missing job returns 404', async () => {
+      const res = await fetch(url('/api/jobs/999999999/run'), {
+        method: 'POST', headers: auth,
+      })
+      expect(res.status).toBe(404)
+    })
+
+    it('POST /api/jobs rejects missing fields with 400', async () => {
+      const res = await fetch(url('/api/jobs'), {
+        method: 'POST', headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      expect(res.status).toBe(400)
+    })
+
+    it('POST /api/jobs rejects unknown agent with 404', async () => {
+      const res = await fetch(url('/api/jobs'), {
+        method: 'POST', headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ agent: 'made-up', prompt: 'hello' }),
+      })
+      expect(res.status).toBe(404)
+    })
+  })
+
+  describe('Schedules API (W-1)', () => {
+    it('GET /api/schedules returns an array', async () => {
+      const res = await fetch(url('/api/schedules'), { headers: auth })
+      expect(res.status).toBe(200)
+      const body = await res.json() as { schedules: unknown[] }
+      expect(Array.isArray(body.schedules)).toBe(true)
+    })
+  })
+
+  describe('Static tasks page', () => {
+    it('GET /tasks serves an HTML page with auth-token injected', async () => {
+      const res = await fetch(url('/tasks'))
+      expect(res.status).toBe(200)
+      const text = await res.text()
+      expect(text).toContain('IMHUB_TOKEN')
+      expect(text).toContain('Tasks')
+    })
+  })
 })
