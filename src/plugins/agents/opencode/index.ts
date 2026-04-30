@@ -3,12 +3,23 @@
 
 import type { AgentAdapter, ChatMessage } from '../../../core/types.js'
 import { crossSpawn } from '../../../utils/cross-platform.js'
+import { logger } from '../../../core/logger.js'
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 
 function resolveTimeout(): number {
-  if (process.env.OPENCODE_TIMEOUT_MS) {
-    return parseInt(process.env.OPENCODE_TIMEOUT_MS, 10)
+  const raw = process.env.OPENCODE_TIMEOUT_MS
+  if (raw) {
+    const n = parseInt(raw, 10)
+    if (Number.isFinite(n) && n > 0) {
+      return n
+    }
+    logger.warn({
+      event: 'opencode.timeout.invalid',
+      raw,
+      parsed: n,
+      fallback: DEFAULT_TIMEOUT_MS,
+    }, `Invalid OPENCODE_TIMEOUT_MS="${raw}", using default ${Math.round(DEFAULT_TIMEOUT_MS / 60000)}min`)
   }
   return DEFAULT_TIMEOUT_MS
 }

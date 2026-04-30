@@ -104,7 +104,15 @@ export async function startWebServer(options: {
   // WebSocket server
   const wss = new WebSocketServer({ server: httpServer })
 
-  wss.on('connection', (ws: WebSocket) => {
+  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+    // Verify token from URL query before accepting connection
+    const wsUrl = new URL(req.url || '/', `http://localhost:${port}`)
+    const wsToken = wsUrl.searchParams.get('token')
+    if (wsToken !== webToken) {
+      ws.close(1008, 'Unauthorized')
+      return
+    }
+
     const clientId = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const client: ClientConnection = { ws, id: clientId, agent: options.defaultAgent }
     clients.set(clientId, client)
@@ -202,20 +210,51 @@ async function handlePutConfig(req: IncomingMessage, res: ServerResponse): Promi
   try {
     const body = await readBody(req)
     const incoming = JSON.parse(body) as Record<string, unknown>
-
     const existing = await loadConfig()
 
-    const merged: Config = { ...existing }
+    const merged: Record<string, unknown> = { ...existing }
 
     for (const key of Object.keys(incoming)) {
       const val = incoming[key]
+
+      // Deep-protect nested known-masked paths so `ab****yz` never overwrites true value
+      if (key === 'telegram' && typeof val === 'object' && val !== null) {
+        const t = val as Record<string, unknown>
+        merged.telegram = {
+          ...(existing.telegram || {}),
+          ...t,
+          botToken: typeof t.botToken === 'string' && isMasked(t.botToken) ? existing.telegram?.botToken : t.botToken,
+        }
+        continue
+      }
+      if (key === 'feishu' && typeof val === 'object' && val !== null) {
+        const f = val as Record<string, unknown>
+        merged.feishu = {
+          ...(existing.feishu || {}),
+          ...f,
+          appSecret: typeof f.appSecret === 'string' && isMasked(f.appSecret) ? existing.feishu?.appSecret : f.appSecret,
+        }
+        continue
+      }
+      if (key === 'acpAgents' && Array.isArray(val)) {
+        merged.acpAgents = (val as unknown[]).map((item: unknown, i: number) => {
+          const a = item as Record<string, unknown> | undefined
+          const old = existing.acpAgents?.[i]
+          if (a?.auth && typeof a.auth === 'object' && typeof (a.auth as Record<string, unknown>).token === 'string' && isMasked((a.auth as Record<string, unknown>).token as string)) {
+            return { ...a, auth: { ...(a.auth as Record<string, unknown>), token: old?.auth?.token } }
+          }
+          return a
+        })
+        continue
+      }
+
       if (typeof val === 'string' && isMasked(val)) {
         continue
       }
-      (merged as Record<string, unknown>)[key] = val
+      merged[key] = val
     }
 
-    await saveConfig(merged)
+    await saveConfig(merged as Config)
     sendJson(res, 200, { ok: true })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

@@ -365,7 +365,8 @@
     // Connect
     function connect() {
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${protocol}//${location.host}`);
+      const token = window.IMHUB_TOKEN || '';
+      ws = new WebSocket(`${protocol}//${location.host}/?token=${encodeURIComponent(token)}`);
 
       ws.onopen = () => {
         setStatus('connected', t('connected'));

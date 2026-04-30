@@ -201,6 +201,17 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     return
   }
 
+  // Determine active agent for prefix
+  const existingSession = await sessionManager.getExistingSession(platform, ctx.channelId, message.threadId)
+  const activeAgent = existingSession?.agent || defaultAgent
+
+  const maybePrefix = (text: string): string => {
+    if (activeAgent && activeAgent !== defaultAgent) {
+      return `[${activeAgent}]\n\n${text}`
+    }
+    return text
+  }
+
   const stopTyping = async () => {
     if (messenger.sendTyping) {
       try {
@@ -244,7 +255,7 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
           .build()
         await messenger.sendCard(message.threadId, card)
       } else {
-        await messenger.sendMessage(message.threadId, result)
+        await messenger.sendMessage(message.threadId, maybePrefix(result))
       }
 
       logger.info({ event: 'message.sent', responseLen: result.length })
@@ -267,7 +278,7 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
             .build()
           await messenger.sendCard(message.threadId, card)
         } else {
-          await messenger.sendMessage(message.threadId, fullResponse)
+          await messenger.sendMessage(message.threadId, maybePrefix(fullResponse))
         }
 
         logger.info({ event: 'message.sent', responseLen: fullResponse.length })
