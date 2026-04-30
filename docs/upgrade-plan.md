@@ -24,9 +24,12 @@
 
 - [x] P0-1 session 文件路径消毒（防路径注入）
 - [x] P0-2 Web API 鉴权（随机 token + loopback-only + header 校验）
+- [x] P0-2b WebSocket 鉴权补丁（URL query token）← 2026-04-30 补丁
 - [x] P0-3 Config PUT mask 回写修复
+- [x] P0-3b mask 深层嵌套保护（telegram/feishu/acpAgents）← 2026-04-30 补丁
 - [x] P0-4 opencode extractText 收紧（白名单 type）
 - [x] P0-5 opencode timeout 可配置
+- [x] P0-5b timeout 输入校验（NaN/负数/0 防护）← 2026-04-30 补丁
 - [x] P0-6/7 确认 src 中无 Teams/Slack/wechaty 死代码
 
 ### 1.2 结构化日志
@@ -36,6 +39,11 @@
 - [x] Agent invocation span（start/end/duration/cost/outcome）
 - [x] 日志级别可配（LOG_LEVEL env）
 - [x] 敏感字段脱敏（token、secret 不出现在日志）
+
+### 1.3 集成修复
+
+- [x] Web 前端 fetch 加 token header（R4 补丁）
+- [x] 恢复 agent 前缀（R5 补丁）
 
 ### 1.3 基础设施
 
