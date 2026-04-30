@@ -62,14 +62,18 @@ export class ACPClient {
    * Parses Server-Sent Events per the W3C spec:
    * - Multiple `data:` lines for a single event are joined with newlines
    * - Events separated by blank lines
+   *
+   * `sessionId` is forwarded as `session_id` in the request body so the
+   * remote agent can persist context across turns (P2-C).
    */
-  async *streamPrompt(prompt: string, history?: ChatMessage[]): AsyncGenerator<string> {
+  async *streamPrompt(prompt: string, history?: ChatMessage[], sessionId?: string): AsyncGenerator<string> {
     const body: ACPCreateTaskRequest = {
       input: {
         prompt,
         history: history?.map((m) => ({ role: m.role, content: m.content })),
       },
       mode: 'stream',
+      ...(sessionId ? { session_id: sessionId } : {}),
     }
 
     const res = await fetch(`${this.baseUrl}/tasks`, {
@@ -151,13 +155,14 @@ export class ACPClient {
   }
 
   /** Send prompt and wait for complete response (non-streaming fallback) */
-  async sendPromptSync(prompt: string, history?: ChatMessage[]): Promise<string> {
+  async sendPromptSync(prompt: string, history?: ChatMessage[], sessionId?: string): Promise<string> {
     const body: ACPCreateTaskRequest = {
       input: {
         prompt,
         history: history?.map((m) => ({ role: m.role, content: m.content })),
       },
       mode: 'sync',
+      ...(sessionId ? { session_id: sessionId } : {}),
     }
 
     const res = await fetch(`${this.baseUrl}/tasks`, {

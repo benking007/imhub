@@ -135,9 +135,10 @@ export async function startACPServer(options: {
     if (req.method === 'POST' && url.pathname === '/tasks') {
       try {
         const body = await readBody(req, res)
-        const parsedBody = JSON.parse(body) as { input?: { prompt?: string }; mode?: string }
+        const parsedBody = JSON.parse(body) as { input?: { prompt?: string }; mode?: string; session_id?: string }
         const input = parsedBody.input
         const mode = parsedBody.mode
+        const upstreamSessionId = parsedBody.session_id
         if (!input?.prompt) {
           sendJson(res, 400, { error: 'Missing input.prompt' })
           return
@@ -151,12 +152,23 @@ export async function startACPServer(options: {
         const logger = createLogger({ traceId, platform: 'acp-server', component: 'acp', taskId })
 
         // Persist in Job Board so the task survives restarts and shares the
-        // /job toolset with messenger-originated jobs.
-        const jobId = createJob('acp:gateway', input.prompt)
-        taskIndex.set(taskId, { jobId })
+        // /job toolset with messenger-originated jobs. If the board is
+        // unavailable (SQLite not loadable) we still serve the request —
+        // jobId stays 0 and GET /tasks/:id falls back to "task not found".
+        let jobId = 0
+        try {
+          jobId = createJob('acp:gateway', input.prompt)
+          taskIndex.set(taskId, { jobId })
+        } catch (err) {
+          logger.warn({ event: 'acp.job-board.unavailable', err: err instanceof Error ? err.message : String(err) },
+            'Job board unavailable — task will not be persisted')
+        }
 
         const routeCtx: RouteContext = {
-          threadId: `acp:${taskId}`,
+          // Use the upstream session_id (when supplied) as the thread key
+          // so subsequent calls in the same conversation hit the same
+          // im-hub Session and preserve conversation history.
+          threadId: upstreamSessionId ? `acp:session:${upstreamSessionId}` : `acp:${taskId}`,
           channelId: 'acp',
           platform: 'acp',
           defaultAgent: options.defaultAgent,
@@ -192,7 +204,9 @@ export async function startACPServer(options: {
             // Run + complete via Job Board so the same job row carries the
             // result. We push the completed text through a synthetic runner
             // that yields it once, lets job-board flip status to completed.
-            await runJob(jobId, async function* () { yield fullText }, logger)
+            if (jobId) {
+              await runJob(jobId, async function* () { yield fullText }, logger).catch(() => { /* job board flaky */ })
+            }
           } finally {
             res.end()
           }
@@ -208,7 +222,9 @@ export async function startACPServer(options: {
             fullResponse += chunk
           }
         }
-        await runJob(jobId, async function* () { yield fullResponse }, logger)
+        if (jobId) {
+          await runJob(jobId, async function* () { yield fullResponse }, logger).catch(() => { /* job board flaky */ })
+        }
         sendJson(res, 200, {
           id: taskId,
           status: 'completed',

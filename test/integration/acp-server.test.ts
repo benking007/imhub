@@ -117,4 +117,37 @@ describe('ACP Server', () => {
     })
     expect(res.status).toBe(200)
   })
+
+  it('threads session_id across multiple POST /tasks calls (P2-C)', async () => {
+    // First call seeds the session; second call should reuse it.
+    const sessionId = 'session-' + Math.random().toString(36).slice(2, 10)
+
+    const res1 = await fetch(url('/tasks'), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TEST_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        input: { prompt: 'hello' },
+        mode: 'sync',
+        session_id: sessionId,
+      }),
+    })
+    expect(res1.status).toBe(200)
+    const body1 = await res1.json() as { id: string; output?: { content: string } }
+    expect(body1.output?.content).toBeTruthy()
+
+    const res2 = await fetch(url('/tasks'), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TEST_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        input: { prompt: 'and again' },
+        mode: 'sync',
+        session_id: sessionId,
+      }),
+    })
+    expect(res2.status).toBe(200)
+    // The two task ids must differ but the underlying session has been
+    // reused (im-hub created one Session entry pinned to acp:session:<id>).
+    const body2 = await res2.json() as { id: string }
+    expect(body2.id).not.toBe(body1.id)
+  })
 })
