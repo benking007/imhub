@@ -95,7 +95,8 @@ export abstract class AgentBase implements AgentAdapter {
   /**
    * Spawn the CLI process with JSONL output, collect full text via extractText.
    */
-  protected spawnAndCollect(prompt: string): Promise<string> {
+  /** Public: spawn the CLI process and collect text. Accepts abort signal for cancellation. */
+  public spawnAndCollect(prompt: string, signal?: AbortSignal): Promise<string> {
     const timeout = this.timeoutMs
 
     return new Promise((resolve, reject) => {
@@ -110,20 +111,32 @@ export abstract class AgentBase implements AgentAdapter {
       let errorMessage = ''
       let resolved = false
 
+      const finalize = (msg: string) => {
+        if (resolved) return
+        resolved = true
+        clearTimeout(timer)
+        proc.kill('SIGTERM')
+        setTimeout(() => { try { proc.kill('SIGKILL') } catch { /* ignore */ } }, 5000)
+        resolve(msg)
+      }
+
       const timer = setTimeout(() => {
-        if (!resolved) {
-          resolved = true
-          rootLogger.warn({ component: `agent.${this.name}`, agent: this.name, timeoutMs: timeout },
-            `[${this.name}] timeout after ${Math.round(timeout / 60000)}min`)
-          proc.kill('SIGTERM')
-          setTimeout(() => {
-            try { proc.kill('SIGKILL') } catch { /* ignore */ }
-          }, 5000)
-          resolve(fullText
-            ? fullText + `\n\n⚠️ 处理超时（已超过 ${Math.round(timeout / 60000)} 分钟），以上为超时前已收到的部分结果。`
-            : `⚠️ 处理超时（已超过 ${Math.round(timeout / 60000)} 分钟），agent 未能在规定时间内完成。`)
-        }
+        rootLogger.warn({ component: `agent.${this.name}`, agent: this.name, timeoutMs: timeout },
+          `[${this.name}] timeout after ${Math.round(timeout / 60000)}min`)
+        finalize(fullText
+          ? fullText + `\n\n⚠️ 处理超时（已超过 ${Math.round(timeout / 60000)} 分钟）`
+          : `⚠️ 处理超时（已超过 ${Math.round(timeout / 60000)} 分钟）`)
       }, timeout)
+
+      // Abort signal support (for cancellation)
+      if (signal) {
+        const onAbort = () => {
+          rootLogger.info({ component: `agent.${this.name}`, agent: this.name }, `[${this.name}] cancelled via signal`)
+          finalize(fullText ? fullText + '\n\n🚫 任务已被取消。' : '🚫 任务已被取消。')
+        }
+        if (signal.aborted) { onAbort(); return }
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
 
       proc.stdout?.on('data', (data: Buffer) => {
         stdout += data.toString()

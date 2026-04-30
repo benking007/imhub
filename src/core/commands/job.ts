@@ -3,6 +3,7 @@
 import type { RouteContext } from '../router.js'
 import { registry } from '../registry.js'
 import { sessionManager } from '../session.js'
+import { AgentBase } from '../agent-base.js'
 import { createJob, getJob, listJobs, cancelJob, runJob, getJobStats, type Job } from '../job-board.js'
 
 function formatJob(j: Job): string {
@@ -91,10 +92,20 @@ Agent: ${job.agent}
       const agent = registry.findAgent(job.agent)
       if (!agent) return `❌ Agent "${job.agent}" not found.`
 
-      // Fire and forget
-      runJob(id, async function* (j, logger) {
-        const generator = agent.sendPrompt(`job-${j.id}`, j.prompt, [])
-        for await (const chunk of generator) yield chunk
+      // Fire and forget with signal support for cancellation
+      const isAgentBaseAgent = agent instanceof AgentBase
+      runJob(id, async function* (j, logger, signal) {
+        if (isAgentBaseAgent) {
+          const ba = agent as unknown as AgentBase
+          const result = await ba.spawnAndCollect(j.prompt, signal)
+          if (result) yield result
+        } else {
+          const generator = agent.sendPrompt(`job-${j.id}`, j.prompt, [])
+          for await (const chunk of generator) {
+            if (signal.aborted) break
+            yield chunk
+          }
+        }
       }, ctx.logger).catch(() => {})
 
       return `🔄 任务 #${id} 已开始运行。

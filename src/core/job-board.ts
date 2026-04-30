@@ -14,6 +14,9 @@ const BOARD_DB = join(BOARD_DIR, 'jobs.db')
 
 let db: Database.Database | null = null
 
+// Running job controllers (for cancellation)
+const runningControllers = new Map<number, AbortController>()
+
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 export interface Job {
@@ -28,7 +31,7 @@ export interface Job {
 }
 
 interface JobRunner {
-  (job: Job, logger: Logger): AsyncGenerator<string>
+  (job: Job, logger: Logger, signal: AbortSignal): AsyncGenerator<string>
 }
 
 function getDb(): Database.Database {
@@ -94,26 +97,43 @@ export async function runJob(
   const job = getJob(id)
   if (!job) return
 
+  const controller = new AbortController()
+  runningControllers.set(id, controller)
+
   updateJob(id, { status: 'running' })
   logger.info({ event: 'job.start', jobId: id, agent: job.agent })
 
   let fullText = ''
   try {
-    for await (const chunk of runner(job, logger)) {
+    for await (const chunk of runner(job, logger, controller.signal)) {
+      if (controller.signal.aborted) break
       fullText += chunk
     }
-    updateJob(id, { status: 'completed', result: fullText, completed_at: new Date().toISOString() })
-    logger.info({ event: 'job.complete', jobId: id, resultLen: fullText.length })
+    // Only update if not cancelled
+    if (!controller.signal.aborted) {
+      updateJob(id, { status: 'completed', result: fullText, completed_at: new Date().toISOString() })
+      logger.info({ event: 'job.complete', jobId: id, resultLen: fullText.length })
+    } else {
+      updateJob(id, { status: 'cancelled', result: fullText || null, completed_at: new Date().toISOString() })
+      logger.info({ event: 'job.cancelled', jobId: id })
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     updateJob(id, { status: 'failed', error: msg, completed_at: new Date().toISOString() })
     logger.error({ event: 'job.failed', jobId: id, error: msg })
+  } finally {
+    runningControllers.delete(id)
   }
 }
 
 export function cancelJob(id: number): boolean {
   const job = getJob(id)
   if (!job || (job.status !== 'pending' && job.status !== 'running')) return false
+  const ctrl = runningControllers.get(id)
+  if (ctrl) {
+    ctrl.abort()
+    runningControllers.delete(id)
+  }
   updateJob(id, { status: 'cancelled', completed_at: new Date().toISOString() })
   return true
 }
