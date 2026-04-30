@@ -23,6 +23,7 @@ import {
   type Config as OnboardingConfig,
 } from './core/onboarding.js'
 import { startWebServer } from './web/server.js'
+import { startACPServer } from './core/acp-server.js'
 
 // Helper to format agent install hint for missing agents
 function formatMissingAgentHint(missing: string[]): string {
@@ -170,9 +171,28 @@ program
       console.warn(`⚠️ Web chat server failed to start: ${errMsg}`)
     }
 
+    // ============================================
+    // START ACP SERVER
+    // ============================================
+
+    let acpServer: { close: () => void; port: number } | undefined
+    const acpPort = (config as Record<string, unknown>).acpPort as number | undefined || undefined
+    try {
+      acpServer = await startACPServer({
+        port: acpPort,
+        defaultAgent: config.defaultAgent,
+      })
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      console.warn(`⚠️ ACP server failed to start: ${errMsg}`)
+    }
+
     console.log('\n✅ IM hub is running!')
     if (webServer) {
       console.log(`   Chat UI: http://localhost:${webServer.port}`)
+    }
+    if (acpServer) {
+      console.log(`   ACP Endpoint: http://localhost:${acpServer.port}`)
     }
     console.log('Press Ctrl+C to stop')
 
@@ -181,6 +201,7 @@ program
       console.log('\n👋 Shutting down...')
       sessionManager.stop()
       webServer?.close()
+      acpServer?.close()
 
       // Stop all messengers
       for (const name of registry.listMessengers()) {
