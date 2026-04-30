@@ -1,5 +1,7 @@
 // Mock child_process for testing Claude Code adapter
 
+import { vi } from 'bun:test'
+
 export interface MockProcessOptions {
   chunks?: string[]
   delay?: number

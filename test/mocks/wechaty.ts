@@ -1,5 +1,7 @@
 // Mock wechaty for testing WeChat adapter
 
+import { vi } from 'bun:test'
+
 export interface MockWechatyOptions {
   shouldFailStart?: boolean
   shouldFailLogin?: boolean

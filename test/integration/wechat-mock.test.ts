@@ -42,34 +42,38 @@ class TestableWeChatAdapter {
   ) {}
 
   async start(): Promise<void> {
-    // Setup event handlers
-    this.bot.on('scan', (_qrcode: string, _status: number) => {})
-    this.bot.on('login', (_user: MockContact) => {})
-    this.bot.on('logout', (_user: MockContact) => {})
-    this.bot.on('message', async (msg: MockMessage) => {
+    // Setup event handlers — bot.on() takes a generic handler so we cast
+    // the typed ones to keep the scenario readable.
+    this.bot.on('scan', ((_qrcode: string, _status: number) => {}) as (...args: unknown[]) => void)
+    this.bot.on('login', ((_user: MockContact) => {}) as (...args: unknown[]) => void)
+    this.bot.on('logout', ((_user: MockContact) => {}) as (...args: unknown[]) => void)
+    this.bot.on('message', (async (msg: MockMessage) => {
       if (msg.self()) return
 
       const contact = msg.talker()
       const room = msg.room()
       const text = msg.text()
 
+      const channelId = room ? `room:${room.id}` : `user:${contact.id}`
       const message = {
         id: msg.id,
-        threadId: room ? `room:${room.id}` : `user:${contact.id}`,
+        threadId: channelId,
         userId: contact.id,
         text,
         timestamp: msg.date(),
+        channelId,
       }
 
       const ctx: MessageContext = {
         message,
         platform: 'wechat',
+        channelId,
       }
 
       if (this.messageHandler) {
         await this.messageHandler(ctx)
       }
-    })
+    }) as (...args: unknown[]) => void)
 
     await this.bot.start()
   }
