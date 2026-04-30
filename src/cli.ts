@@ -242,6 +242,7 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     defaultAgent,
     traceId,
     logger,
+    userId: message.userId,
   }
 
   try {

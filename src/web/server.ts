@@ -377,6 +377,7 @@ async function handleClientMessage(
           defaultAgent: client.agent,
           traceId,
           logger,
+          userId: `web:${clientId}`,
         }
 
         logger.info({ event: 'message.received', text: text.substring(0, 120) })

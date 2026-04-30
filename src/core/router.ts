@@ -7,6 +7,8 @@ import { sessionManager } from './session.js'
 import { isAgentAvailableCached, formatAgentNotAvailableError } from './onboarding.js'
 import { handleBuiltInCommand } from './commands/builtin.js'
 import { handleAgentCommand } from './commands/agent.js'
+import { handleAuditCommand } from './commands/audit.js'
+import { logInvocation } from './audit-log.js'
 
 /** Route context passed through the routing pipeline */
 export interface RouteContext {
@@ -16,6 +18,7 @@ export interface RouteContext {
   defaultAgent: string
   traceId: string
   logger: Logger
+  userId?: string
 }
 
 /** Built-in coding agent commands forwarded to the active agent */
@@ -50,6 +53,7 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'help') return { type: 'command', command: 'help' }
   if (cmd === 'agents') return { type: 'command', command: 'agents' }
   if (cmd === 'new') return { type: 'command', command: 'new' }
+  if (cmd === 'audit') return { type: 'audit', args: rest }
 
   // Check if it's an agent alias (registered agents take priority over generic commands)
   const agent = registry.findAgent(cmd)
@@ -80,6 +84,10 @@ export async function routeMessage(
 
     case 'agentCommand': {
       return handleAgentCommand(parsed.command, parsed.prompt, ctx)
+    }
+
+    case 'audit': {
+      return handleAuditCommand(parsed.args, ctx)
     }
 
     case 'agent': {
@@ -157,11 +165,15 @@ export async function callAgentWithHistory(
 
   return (async function* (): AsyncGenerator<string> {
     let fullResponse = ''
+    let invocationError: string | undefined
     try {
       for await (const chunk of generator) {
         fullResponse += chunk
         yield chunk
       }
+    } catch (err) {
+      invocationError = err instanceof Error ? err.message : String(err)
+      throw err
     } finally {
       const durationMs = Date.now() - startTime
       if (fullResponse.trim()) {
@@ -176,6 +188,21 @@ export async function callAgentWithHistory(
         agent: agent!.name,
         durationMs,
         responseLen: fullResponse.length,
+      })
+
+      // Write audit record
+      logInvocation({
+        traceId: ctx.traceId,
+        userId: ctx.userId || 'unknown',
+        platform: ctx.platform,
+        agent: agent!.name,
+        intent: 'default',
+        promptLen: prompt.length,
+        responseLen: fullResponse.length,
+        durationMs,
+        cost: 0,
+        success: !invocationError,
+        error: invocationError,
       })
     }
   })()

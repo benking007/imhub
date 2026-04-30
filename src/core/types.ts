@@ -32,6 +32,7 @@ export type ParsedMessage =
   | { type: 'command'; command: 'start' | 'status' | 'help' | 'agents' | 'new' }
   | { type: 'agentCommand'; command: string; prompt: string }
   | { type: 'agent'; agent: string; prompt: string }
+  | { type: 'audit'; args: string }
   | { type: 'error'; prompt: string; error: string }
 
 /**
