@@ -8,6 +8,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { mkdirSync } from 'fs'
 import { logger as rootLogger } from './logger.js'
+import { recordInvocation } from './metrics.js'
 
 const log = rootLogger.child({ component: 'audit-log' })
 
@@ -101,6 +102,17 @@ export interface AuditRecord {
 }
 
 export function logInvocation(rec: AuditRecord): void {
+  // Always update in-memory metrics first so /api/metrics works even when
+  // the SQLite layer is degraded (e.g. bun runtime, disk full).
+  recordInvocation({
+    agent: rec.agent,
+    intent: rec.intent,
+    platform: rec.platform,
+    durationMs: rec.durationMs,
+    cost: rec.cost,
+    success: rec.success,
+  })
+
   const d = getDb()
   if (!d) return
   try {

@@ -102,6 +102,12 @@ export async function startWebServer(options: {
     if (url.pathname === '/api/workspaces' && req.method === 'GET') {
       return handleListWorkspaces(req, res)
     }
+    if (url.pathname === '/api/metrics' && req.method === 'GET') {
+      return handleMetrics(req, res, url)
+    }
+    if (url.pathname === '/api/health' && req.method === 'GET') {
+      return handleHealth(req, res)
+    }
 
     res.writeHead(404)
     res.end('Not found')
@@ -290,6 +296,39 @@ async function handleListWorkspaces(_req: IncomingMessage, res: ServerResponse):
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     sendJson(res, 500, { error: msg })
+  }
+}
+
+async function handleMetrics(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  try {
+    const fmt = url.searchParams.get('format') || 'prom'
+    const { snapshot, toPrometheus } = await import('../core/metrics.js')
+    if (fmt === 'json') {
+      sendJson(res, 200, snapshot())
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' })
+    res.end(toPrometheus())
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    sendJson(res, 500, { error: msg })
+  }
+}
+
+async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Quick check: agent availability snapshot. Already used by settings UI;
+  // exposing it under /api/health gives ops a stable URL.
+  try {
+    const status = await getAgentStatuses()
+    const anyHealthy = Object.values(status).some(Boolean)
+    sendJson(res, anyHealthy ? 200 : 503, {
+      ok: anyHealthy,
+      agents: status,
+      uptimeSec: Math.round(process.uptime()),
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    sendJson(res, 500, { ok: false, error: msg })
   }
 }
 
