@@ -9,19 +9,18 @@
 import { access, constants, readdir } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { AgentAdapter, ChatMessage } from '../../../core/types.js'
+import { AgentBase } from '../../../core/agent-base.js'
 import { crossSpawn, isWindows, isMac } from '../../../utils/cross-platform.js'
+import { logger as rootLogger } from '../../../core/logger.js'
 
 // Installation method detection result
 interface CopilotInstall {
   type: 'gh-ext' | 'standalone' | 'vscode' | 'homebrew' | 'winget'
   command: string
-  args: string[]
+  argsPrefix: string[]
 }
 
-/**
- * Check if a command exists and can be executed
- */
+/** Check if a command exists and can be executed */
 async function commandExists(cmd: string): Promise<boolean> {
   return new Promise((resolve) => {
     const proc = crossSpawn(cmd, ['--version'], { stdio: 'ignore' })
@@ -30,21 +29,14 @@ async function commandExists(cmd: string): Promise<boolean> {
   })
 }
 
-/**
- * Check if GitHub CLI has copilot extension
- */
 async function checkGHCopilot(): Promise<CopilotInstall | null> {
-  // Check if gh is available
-  const ghExists = await commandExists('gh')
-  if (!ghExists) return null
-
-  // Check if copilot extension is installed
+  if (!(await commandExists('gh'))) return null
   return new Promise((resolve) => {
     const proc = crossSpawn('gh', ['copilot', '--version'], { stdio: 'ignore' })
     proc.on('error', () => resolve(null))
     proc.on('close', (code) => {
       if (code === 0) {
-        resolve({ type: 'gh-ext', command: 'gh', args: ['copilot'] })
+        resolve({ type: 'gh-ext', command: 'gh', argsPrefix: ['copilot'] })
       } else {
         resolve(null)
       }
@@ -52,23 +44,14 @@ async function checkGHCopilot(): Promise<CopilotInstall | null> {
   })
 }
 
-/**
- * Check if standalone copilot command exists
- */
 async function checkStandaloneCopilot(): Promise<CopilotInstall | null> {
-  const exists = await commandExists('copilot')
-  if (exists) {
-    return { type: 'standalone', command: 'copilot', args: [] }
+  if (await commandExists('copilot')) {
+    return { type: 'standalone', command: 'copilot', argsPrefix: [] }
   }
   return null
 }
 
-/**
- * Get Copilot CLI binary path from VS Code extension.
- * Used as fallback if no command is found in PATH.
- */
 async function findVSCodeCopilot(): Promise<CopilotInstall | null> {
-  // macOS: standard location
   if (isMac) {
     const macPath = join(
       homedir(),
@@ -76,13 +59,10 @@ async function findVSCodeCopilot(): Promise<CopilotInstall | null> {
     )
     try {
       await access(macPath, constants.X_OK)
-      return { type: 'vscode', command: macPath, args: [] }
-    } catch {
-      // Continue to other checks
-    }
+      return { type: 'vscode', command: macPath, argsPrefix: [] }
+    } catch { /* fall through */ }
   }
 
-  // Windows: need to find the extension folder (versioned)
   if (isWindows) {
     const extensionsDir = join(homedir(), '.vscode', 'extensions')
     try {
@@ -94,67 +74,111 @@ async function findVSCodeCopilot(): Promise<CopilotInstall | null> {
         const copilotBin = join(extensionsDir, copilotDir.name, 'copilotCli', 'copilot.exe')
         try {
           await access(copilotBin, constants.X_OK)
-          return { type: 'vscode', command: copilotBin, args: [] }
-        } catch {
-          // Continue
-        }
+          return { type: 'vscode', command: copilotBin, argsPrefix: [] }
+        } catch { /* fall through */ }
       }
-    } catch {
-      // Ignore readdir errors
-    }
+    } catch { /* ignore readdir errors */ }
   }
 
-  // Linux: standard location
-  const linuxPath = join(
-    homedir(),
-    '.vscode/extensions/github.copilot-chat/copilotCli/copilot'
-  )
+  const linuxPath = join(homedir(), '.vscode/extensions/github.copilot-chat/copilotCli/copilot')
   try {
     await access(linuxPath, constants.X_OK)
-    return { type: 'vscode', command: linuxPath, args: [] }
+    return { type: 'vscode', command: linuxPath, argsPrefix: [] }
   } catch {
     return null
   }
 }
 
-// Cached installation info
+/** TTL'd installation cache so a fresh install is picked up within 2min. */
+const INSTALL_CACHE_TTL = 2 * 60 * 1000
 let cachedInstall: CopilotInstall | null = null
+let cachedAt = 0
 
-/**
- * Detect Copilot installation method
- * Priority: gh copilot > standalone > VS Code extension
- */
 async function detectCopilotInstall(): Promise<CopilotInstall | null> {
-  if (cachedInstall) return cachedInstall
+  if (cachedInstall && Date.now() - cachedAt < INSTALL_CACHE_TTL) return cachedInstall
 
-  // 1. Check GitHub CLI extension (recommended)
-  cachedInstall = await checkGHCopilot()
-  if (cachedInstall) return cachedInstall
-
-  // 2. Check standalone copilot command
-  cachedInstall = await checkStandaloneCopilot()
-  if (cachedInstall) return cachedInstall
-
-  // 3. Check VS Code extension
-  cachedInstall = await findVSCodeCopilot()
+  cachedInstall =
+    (await checkGHCopilot()) ||
+    (await checkStandaloneCopilot()) ||
+    (await findVSCodeCopilot())
+  cachedAt = Date.now()
   return cachedInstall
 }
 
-export class CopilotAdapter implements AgentAdapter {
+/**
+ * Copilot adapter built on AgentBase. Differs from the other CLI agents
+ * in two ways:
+ *   1. The binary path is discovered async (gh / standalone / VSCode)
+ *   2. The CLI is not JSONL — its stdout is plain text
+ *
+ * AgentBase already handles plain text via the JSON.parse fallback (yields
+ * the line verbatim). We override commandName/buildArgs/extractText after
+ * resolving the install, and use isAvailable() to short-circuit when no
+ * install was found.
+ */
+class CopilotAdapter extends AgentBase {
   readonly name = 'copilot'
   readonly aliases = ['gh', 'github', 'copilotcli', 'ghcp']
 
-  async isAvailable(): Promise<boolean> {
-    const install = await detectCopilotInstall()
-    return install !== null
+  /** Resolved install, populated by isAvailable() and reused by spawn calls. */
+  private resolvedInstall: CopilotInstall | null = null
+
+  protected get commandName(): string {
+    if (!this.resolvedInstall) {
+      // Should never happen — sendPrompt awaits isAvailable() first. But if
+      // someone calls spawnAndCollect directly we degrade by using a
+      // sentinel that the spawn will fail on, surfaced via handleError.
+      return 'copilot'
+    }
+    return this.resolvedInstall.command
   }
 
-  async *sendPrompt(_sessionId: string, prompt: string, history?: ChatMessage[]): AsyncGenerator<string> {
-    console.log(`[Copilot] sendPrompt called, prompt: ${prompt}, history: ${history?.length || 0} messages`)
+  protected buildArgs(prompt: string): string[] {
+    const install = this.resolvedInstall
+    if (!install) return ['-p', prompt, '-s']
+    if (install.type === 'gh-ext') {
+      return [...install.argsPrefix, 'suggest', prompt, '--prompt-only']
+    }
+    return [...install.argsPrefix, '-p', prompt, '-s']
+  }
 
-    const install = await detectCopilotInstall()
-    if (!install) {
-      yield `❌ Copilot CLI 未找到。
+  protected extractText(event: unknown): string {
+    // Copilot CLI is not JSONL; AgentBase's fallback already yields the
+    // raw line. extractText is only consulted on successfully-parsed JSON,
+    // which Copilot never emits.
+    if (event && typeof event === 'object') {
+      const e = event as Record<string, unknown>
+      if (typeof e.content === 'string') return e.content
+      if (typeof e.text === 'string') return e.text
+    }
+    return ''
+  }
+
+  async isAvailable(): Promise<boolean> {
+    this.resolvedInstall = await detectCopilotInstall()
+    return this.resolvedInstall !== null
+  }
+
+  async healthCheck(): Promise<{ ok: boolean; latencyMs?: number }> {
+    const start = Date.now()
+    const ok = await this.isAvailable()
+    return { ok, latencyMs: Date.now() - start }
+  }
+
+  protected handleError(_code: number, stderr: string, _errorMessage: string): string | null {
+    if (stderr.includes('402') || stderr.includes('no quota') || stderr.includes('insufficient')) {
+      return `❌ Copilot 额度不足，请检查您的 GitHub Copilot 订阅。
+
+💡 可以使用以下命令切换到其他 Agent：
+• /claude - 切换到 Claude Code
+• /codex - 切换到 OpenAI Codex
+• /agents - 查看所有可用 Agent`
+    }
+    return null
+  }
+
+  protected notAvailableMessage(): string {
+    return `❌ Copilot CLI 未找到。
 
 安装方式 (选择其一):
   npm i -g @github/copilot
@@ -163,104 +187,18 @@ export class CopilotAdapter implements AgentAdapter {
   winget install GitHub.Copilot (Windows)
 
 或安装 VS Code Copilot Chat 扩展。`
+  }
+
+  // Override sendPrompt to short-circuit when not installed — gives a
+  // friendlier message than spawnStream would after spawn failure.
+  async *sendPrompt(sessionId: string, prompt: string, history?: import('../../../core/types.js').ChatMessage[]): AsyncGenerator<string> {
+    if (!(await this.isAvailable())) {
+      yield this.notAvailableMessage()
       return
     }
-
-    // Build prompt with conversation context
-    const contextualPrompt = this.buildContextualPrompt(prompt, history)
-
-    console.log(`[Copilot] Using installation: ${install.type} (${install.command})`)
-    const response = await this.callCopilot(contextualPrompt, install)
-    console.log(`[Copilot] Response length: ${response.length}`)
-
-    if (response) {
-      yield response
-    }
-  }
-
-  /**
-   * Build prompt with conversation history context
-   */
-  private buildContextualPrompt(prompt: string, history?: ChatMessage[]): string {
-    if (!history || history.length === 0) {
-      return prompt
-    }
-
-    const historyText = history
-      .map(msg => `[${msg.role === 'user' ? 'User' : 'Assistant'}]: ${msg.content}`)
-      .join('\n\n')
-
-    return `Previous conversation context:
-${historyText}
-
-Current request: ${prompt}`
-  }
-
-  private callCopilot(prompt: string, install: CopilotInstall): Promise<string> {
-    return new Promise((resolve, reject) => {
-      // Build command args based on installation type
-      let args: string[]
-      if (install.type === 'gh-ext') {
-        // gh copilot suggest "prompt"
-        args = [...install.args, 'suggest', prompt, '--prompt-only']
-      } else {
-        // copilot -p "prompt" -s
-        args = [...install.args, '-p', prompt, '-s']
-      }
-
-      const proc = crossSpawn(install.command, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-
-      let stdout = ''
-      let stderr = ''
-
-      proc.stdout?.on('data', (data: Buffer) => {
-        stdout += data.toString()
-      })
-
-      proc.stderr?.on('data', (data: Buffer) => {
-        stderr += data.toString()
-        console.error('[Copilot stderr]', data.toString())
-      })
-
-      proc.on('error', (err) => {
-        reject(err)
-      })
-
-      proc.on('close', (code) => {
-        console.log('[Copilot] Process closed, code:', code)
-
-        // Check for quota error
-        if (stderr.includes('402') || stderr.includes('no quota') || stderr.includes('insufficient')) {
-          resolve(`❌ Copilot 额度不足，请检查您的 GitHub Copilot 订阅。
-
-💡 可以使用以下命令切换到其他 Agent：
-• /claude - 切换到 Claude Code
-• /codex - 切换到 OpenAI Codex
-• /agents - 查看所有可用 Agent`)
-          return
-        }
-
-        if (code !== 0) {
-          reject(new Error(`Copilot exited with code ${code}: ${stderr}`))
-        } else {
-          const result = stdout.trim()
-          if (!result) {
-            resolve(`❌ Copilot 返回空响应，可能是额度不足或网络问题。
-
-💡 可以使用以下命令切换到其他 Agent：
-• /claude - 切换到 Claude Code
-• /codex - 切换到 OpenAI Codex
-• /agents - 查看所有可用 Agent`)
-          } else {
-            resolve(result)
-          }
-        }
-      })
-    })
+    rootLogger.info({ component: `agent.${this.name}`, agent: this.name, install: this.resolvedInstall?.type }, '[copilot] sendPrompt')
+    yield* super.sendPrompt(sessionId, prompt, history)
   }
 }
 
-// Singleton instance
 export const copilotAdapter = new CopilotAdapter()

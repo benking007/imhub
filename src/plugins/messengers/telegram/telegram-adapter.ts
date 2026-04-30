@@ -6,6 +6,9 @@ import type { MessengerAdapter, MessageContext, Message } from '../../../core/ty
 import type { TelegramConfig } from './types.js'
 import { markdownToTelegramHtml } from './markdown-to-html.js'
 import { splitMessage } from '../../../utils/message-split.js'
+import { logger as rootLogger } from '../../../core/logger.js'
+
+const log = rootLogger.child({ component: 'telegram' })
 
 export class TelegramAdapter implements MessengerAdapter {
   readonly name = 'telegram'
@@ -39,15 +42,15 @@ export class TelegramAdapter implements MessengerAdapter {
 
     // Set up message handler
     this.bot.on('message:text', async (ctx) => {
-      console.log('[Telegram] Received message:', ctx.message.text)
+      log.debug({ text: ctx.message.text }, 'Received message')
       // Ignore messages from bots
       if (ctx.message.from.is_bot) {
-        console.log('[Telegram] Ignoring bot message')
+        log.debug('Ignoring bot message')
         return
       }
 
       if (!this.messageHandler) {
-        console.log('[Telegram] No message handler registered')
+        log.debug('No message handler registered')
         return
       }
 
@@ -67,25 +70,27 @@ export class TelegramAdapter implements MessengerAdapter {
           channelId: this.config?.channelId || 'default',
         }
 
-        console.log('[Telegram] Calling message handler for thread:', message.threadId)
+        log.debug({ threadId: message.threadId }, 'Calling message handler')
         await this.messageHandler(msgCtx)
-        console.log('[Telegram] Message handler completed')
+        log.debug({ threadId: message.threadId }, 'Message handler completed')
       } catch (err) {
-        console.error('[Telegram] Error in message handler:', err)
+        const errMsg = err instanceof Error ? err.message : String(err)
+        const stack = err instanceof Error ? err.stack : undefined
+        log.error({ err: errMsg, stack }, 'Error in message handler')
       }
     })
 
     // Start bot in background - grammy's start() uses long polling and blocks until stopped
-    console.log('[Telegram] Starting bot with long polling...')
+    log.info('Starting bot with long polling')
     this.bot.start().then(() => {
-      console.log('[Telegram] Bot stopped gracefully')
+      log.info('Bot stopped gracefully')
     }).catch((err) => {
       if (this.isRunning) {
-        console.error('[Telegram] Bot polling error:', err)
+        log.error({ err: err instanceof Error ? err.message : String(err) }, 'Bot polling error')
       }
     })
     this.isRunning = true
-    console.log('🚀 Telegram adapter started')
+    log.info('Telegram adapter started')
   }
 
   async stop(): Promise<void> {
@@ -102,7 +107,7 @@ export class TelegramAdapter implements MessengerAdapter {
       this.bot = null
     }
 
-    console.log('👋 Telegram adapter stopped')
+    log.info('Telegram adapter stopped')
   }
 
   onMessage(handler: (ctx: MessageContext) => Promise<void>): void {

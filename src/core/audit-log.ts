@@ -7,6 +7,9 @@ import Database from 'better-sqlite3'
 import { homedir } from 'os'
 import { join } from 'path'
 import { mkdirSync } from 'fs'
+import { logger as rootLogger } from './logger.js'
+
+const log = rootLogger.child({ component: 'audit-log' })
 
 const AUDIT_DIR = join(homedir(), '.im-hub')
 const AUDIT_DB = join(AUDIT_DIR, 'audit.db')
@@ -51,9 +54,7 @@ function getDb(): Database.Database | null {
       dbBroken = true
       db = null
       const msg = err instanceof Error ? err.message : String(err)
-      if (process.env.LOG_LEVEL !== 'silent') {
-        console.warn(`[audit-log] disabled: ${msg}`)
-      }
+      log.warn({ event: 'audit-log.disabled', error: msg }, `audit-log disabled: ${msg}`)
       return null
     }
   }

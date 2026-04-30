@@ -13,6 +13,9 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { mkdir, readFile, writeFile, rename, unlink, appendFile } from 'fs/promises'
 import type { Session, ChatMessage, SubtaskMeta } from './types.js'
+import { logger as rootLogger } from './logger.js'
+
+const log = rootLogger.child({ component: 'session' })
 
 const SESSIONS_DIR = join(homedir(), '.im-hub', 'sessions')
 
@@ -45,7 +48,7 @@ class SessionManager {
     // Start cleanup timer
     this.cleanupTimer = setInterval(() => this.cleanup(), CLEANUP_INTERVAL)
 
-    console.log(`Session manager started (sessions: ${SESSIONS_DIR})`)
+    log.info({ dir: SESSIONS_DIR }, 'Session manager started')
   }
 
   stop(): void {

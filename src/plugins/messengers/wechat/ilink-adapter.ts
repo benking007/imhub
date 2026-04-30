@@ -8,6 +8,9 @@ import { ILINK_ERRORS } from './ilink-types.js'
 import { homedir } from 'os'
 import { join } from 'path'
 import { readFile, writeFile, mkdir } from 'fs/promises'
+import { logger as rootLogger } from '../../../core/logger.js'
+
+const log = rootLogger.child({ component: 'wechat-ilink' })
 
 const CREDENTIALS_FILE = join(homedir(), '.im-hub', 'wechat-credentials.json')
 const POLL_TIMEOUT = 30000 // 30 seconds
@@ -42,13 +45,13 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
     const credentials = await this.loadCredentials()
     if (credentials) {
       this.client.setCredentials(credentials)
-      console.log('✅ WeChat credentials loaded from cache')
+      log.info('Credentials loaded from cache')
     } else {
       throw new Error('No WeChat credentials found. Run "im-hub config wechat" first.')
     }
 
     this.isRunning = true
-    console.log('🚀 WeChat iLink adapter started')
+    log.info('WeChat iLink adapter started')
 
     // Start polling in background
     this.startPolling()
@@ -57,7 +60,7 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
   async stop(): Promise<void> {
     this.isRunning = false
     this.client.clearCredentials()
-    console.log('👋 WeChat iLink adapter stopped')
+    log.info('WeChat iLink adapter stopped')
   }
 
   // ============================================
@@ -115,7 +118,7 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
       const contextToken = this.getContextToken(userId)
       const ticket = await this.client.getTypingTicket(userId, contextToken ?? undefined)
       if (!ticket) {
-        console.log('[WeChat] Could not get typing ticket for user:', userId)
+        log.warn({ userId }, 'Could not get typing ticket')
         return
       }
       typingTicket = ticket
@@ -129,7 +132,7 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
     if (!success) {
       // Ticket might be expired, clear it for next attempt
       this.typingTickets.delete(userId)
-      console.log('[WeChat] Failed to send typing indicator, cleared ticket')
+      log.warn({ userId }, 'Failed to send typing indicator, cleared ticket')
     }
   }
 
@@ -215,14 +218,13 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
   }
 
   private async pollLoop(): Promise<void> {
-    console.log('[WeChat] Polling started')
+    log.info('Polling started')
     while (this.isRunning) {
       try {
         const response = await this.client.getUpdates(this.pollState.getUpdatesBuf)
 
-        // Debug: log response
         if (response.msgs?.length) {
-          console.log('[WeChat] Received', response.msgs.length, 'messages')
+          log.debug({ count: response.msgs.length }, 'Received messages')
         }
 
         // Check for success (ret === 0 or undefined)
@@ -231,22 +233,22 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
           // Update cursor
           this.pollState.getUpdatesBuf = response.get_updates_buf
 
-          // Process messages
           if (response.msgs) {
             for (const msg of response.msgs) {
-              console.log('[WeChat] Processing message:', msg.message_id, 'type:', msg.message_type)
+              log.debug({ messageId: msg.message_id, type: msg.message_type }, 'Processing message')
               await this.handleIncomingMessage(msg)
             }
           }
         } else if (response.ret === ILINK_ERRORS.SESSION_EXPIRED) {
-          console.error('❌ WeChat session expired. Please re-login.')
+          log.error('WeChat session expired. Please re-login.')
           this.isRunning = false
           break
         } else {
-          console.warn('[WeChat] Unexpected response:', response)
+          log.warn({ ret: response.ret }, 'Unexpected response')
         }
-      } catch (error) {
-        console.error('[WeChat] Poll error:', error)
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        log.error({ err: errMsg }, 'Poll error')
       }
 
       // Small delay between polls
@@ -254,54 +256,50 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
     }
 
     this.pollState.isPolling = false
-    console.log('[WeChat] Polling stopped')
+    log.info('Polling stopped')
   }
 
   private async handleIncomingMessage(msg: WeixinMessage): Promise<void> {
-    console.log('[WeChat] handleIncomingMessage called, message_id:', msg.message_id, 'type:', msg.message_type)
+    log.debug({ messageId: msg.message_id, type: msg.message_type }, 'handleIncomingMessage')
 
     if (!this.messageHandler) {
-      console.log('[WeChat] No message handler registered!')
+      log.warn('No message handler registered')
       return
     }
 
-    // Skip messages from bot itself (message_type: 2)
     if (msg.message_type === 2) {
-      console.log('[WeChat] Skipping bot message')
+      log.debug('Skipping bot message')
       return
     }
 
-    // Deduplicate messages - skip if already processed
     const msgId = String(msg.message_id)
     if (msgId && this.processedMessages.has(msgId)) {
-      console.log('[WeChat] Skipping duplicate message:', msgId)
+      log.debug({ messageId: msgId }, 'Skipping duplicate message')
       return
     }
 
-    // Mark as processed
     if (msgId) {
       this.processedMessages.set(msgId, Date.now())
-      // Clean up old entries
       this.cleanupProcessedMessages()
     }
 
-    // Skip messages without text
     if (!msg.item_list?.length) {
-      console.log('[WeChat] No item_list in message')
+      log.debug('No item_list in message')
       return
     }
 
-    // Extract text from message items
     const textItems = msg.item_list.filter((item) => item.type === 1 && item.text_item?.text)
     if (!textItems.length) {
-      console.log('[WeChat] No text items found')
+      log.debug('No text items found')
       return
     }
 
     const text = textItems.map((item) => item.text_item!.text).join('\n')
-    console.log('[WeChat] Extracted text:', text)
-    console.log('[WeChat] from_user_id:', msg.from_user_id)
-    console.log('[WeChat] context_token:', msg.context_token ? 'present' : 'MISSING')
+    log.debug({
+      text,
+      fromUserId: msg.from_user_id,
+      contextToken: msg.context_token ? 'present' : 'missing',
+    }, 'Extracted message')
 
     // Store context token for replies
     if (msg.from_user_id && msg.context_token) {
@@ -324,9 +322,9 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
       channelId: this.client.getCredentials()?.accountId || 'default',
     }
 
-    console.log('[WeChat] Calling message handler...')
+    log.debug('Calling message handler')
     await this.messageHandler(ctx)
-    console.log('[WeChat] Message handler completed')
+    log.debug('Message handler completed')
   }
 
   // ============================================
@@ -380,7 +378,7 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
     const dir = join(CREDENTIALS_FILE, '..')
     await mkdir(dir, { recursive: true })
     await writeFile(CREDENTIALS_FILE, JSON.stringify(credentials, null, 2))
-    console.log(`Credentials saved to ${CREDENTIALS_FILE}`)
+    log.info({ file: CREDENTIALS_FILE }, 'Credentials saved')
   }
 
   // ============================================

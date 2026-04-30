@@ -2,6 +2,9 @@
 
 import type { MessengerAdapter, AgentAdapter } from './types.js'
 import type { ACPAgentConfig } from '../plugins/agents/acp/types.js'
+import { logger as rootLogger } from './logger.js'
+
+const log = rootLogger.child({ component: 'registry' })
 
 /**
  * Global registry for all adapters
@@ -13,21 +16,21 @@ class PluginRegistry {
 
   registerMessenger(adapter: MessengerAdapter): void {
     if (this.messengers.has(adapter.name)) {
-      console.warn(`Messenger "${adapter.name}" already registered, overwriting`)
+      log.warn({ messenger: adapter.name }, `Messenger "${adapter.name}" already registered, overwriting`)
     }
     this.messengers.set(adapter.name, adapter)
   }
 
   registerAgent(adapter: AgentAdapter): void {
     if (this.agents.has(adapter.name)) {
-      console.warn(`Agent "${adapter.name}" already registered, overwriting`)
+      log.warn({ agent: adapter.name }, `Agent "${adapter.name}" already registered, overwriting`)
     }
     this.agents.set(adapter.name, adapter)
 
     // Register aliases
     for (const alias of adapter.aliases) {
       if (this.agentAliases.has(alias)) {
-        console.warn(`Agent alias "${alias}" already registered, overwriting`)
+        log.warn({ alias, agent: adapter.name }, `Agent alias "${alias}" already registered, overwriting`)
       }
       this.agentAliases.set(alias, adapter.name)
     }
@@ -78,19 +81,18 @@ class PluginRegistry {
 
         const available = await adapter.isAvailable().catch(() => false)
         if (!available) {
-          console.warn(`⚠️ ACP agent "${cfg.name}" at ${cfg.endpoint} not reachable, skipping`)
+          log.warn({ acpAgent: cfg.name, endpoint: cfg.endpoint }, `ACP agent "${cfg.name}" not reachable, skipping`)
           return
         }
 
         this.registerAgent(adapter)
-        console.log(`✅ Loaded ACP agent: ${cfg.name} (${cfg.endpoint})`)
+        log.info({ acpAgent: cfg.name, endpoint: cfg.endpoint }, `Loaded ACP agent: ${cfg.name}`)
       })
     )
 
-    // Report any unexpected errors (not connection failures)
     for (const result of results) {
       if (result.status === 'rejected') {
-        console.warn(`⚠️ Failed to load ACP agent: ${result.reason}`)
+        log.warn({ reason: String(result.reason) }, 'Failed to load ACP agent')
       }
     }
   }
@@ -119,7 +121,8 @@ class PluginRegistry {
     const { opencodeAdapter } = await import('../plugins/agents/opencode/index.js')
     this.registerAgent(opencodeAdapter)
 
-    console.log(`Plugin registry initialized: ${this.messengers.size} messengers, ${this.agents.size} agents`)
+    log.info({ messengers: this.messengers.size, agents: this.agents.size },
+      'Plugin registry initialized')
   }
 }
 

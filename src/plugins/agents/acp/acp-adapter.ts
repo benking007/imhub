@@ -6,6 +6,9 @@
 import type { AgentAdapter, ChatMessage } from '../../../core/types.js'
 import type { ACPAgentConfig, ACPManifest } from './types.js'
 import { ACPClient } from './acp-client.js'
+import { logger as rootLogger } from '../../../core/logger.js'
+
+const log = rootLogger.child({ component: 'acp-adapter' })
 
 export class ACPAdapter implements AgentAdapter {
   readonly name: string
@@ -32,7 +35,7 @@ export class ACPAdapter implements AgentAdapter {
       }
     } catch (streamError) {
       const errMsg = streamError instanceof Error ? streamError.message : String(streamError)
-      console.warn(`[ACP] Streaming failed, falling back to sync: ${errMsg}`)
+      log.warn({ agent: this.name, error: errMsg }, 'ACP streaming failed, falling back to sync')
       const response = await this.client.sendPromptSync(prompt, history)
       if (response) yield response
     }

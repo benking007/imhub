@@ -10,8 +10,10 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import { parseMessage, routeMessage, type RouteContext } from '../core/router.js'
 import { sessionManager } from '../core/session.js'
 import { registry } from '../core/registry.js'
-import { generateTraceId, createLogger } from '../core/logger.js'
+import { generateTraceId, createLogger, logger as rootLogger } from '../core/logger.js'
 import { validateConfig } from '../core/config-schema.js'
+
+const webLog = rootLogger.child({ component: 'web' })
 import {
   isAgentAvailableCached,
   loadConfig,
@@ -118,7 +120,7 @@ export async function startWebServer(options: {
     const client: ClientConnection = { ws, id: clientId, agent: options.defaultAgent }
     clients.set(clientId, client)
 
-    console.log(`[Web] Client connected: ${clientId}`)
+    webLog.info({ clientId }, 'Client connected')
 
     // Send available agents list
     sendToClient(ws, {
@@ -136,18 +138,18 @@ export async function startWebServer(options: {
         const msg = JSON.parse(data.toString())
         await handleClientMessage(client, msg, options.defaultAgent)
       } catch (err) {
-        console.error('[Web] Error parsing message:', err)
+        webLog.error({ clientId, err: err instanceof Error ? err.message : String(err) }, 'Error parsing client message')
         sendToClient(ws, { type: 'error', message: 'Invalid message format' })
       }
     })
 
     ws.on('close', () => {
-      console.log(`[Web] Client disconnected: ${clientId}`)
+      webLog.info({ clientId }, 'Client disconnected')
       clients.delete(clientId)
     })
 
     ws.on('error', (err) => {
-      console.error(`[Web] Client error: ${clientId}`, err)
+      webLog.error({ clientId, err: err instanceof Error ? err.message : String(err) }, 'Client WebSocket error')
       clients.delete(clientId)
     })
   })
@@ -158,7 +160,7 @@ export async function startWebServer(options: {
     httpServer.listen(port, '127.0.0.1', () => resolve())
   })
 
-  console.log(`[Web] Chat UI available at http://localhost:${port}`)
+  webLog.info({ port }, `Chat UI available at http://localhost:${port}`)
 
   return {
     port,
@@ -399,7 +401,8 @@ async function handleClientMessage(
         sendToClient(ws, { type: 'done', text: fullText })
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err)
-        console.error('[Web] Error handling message:', errorMsg)
+        const stack = err instanceof Error ? err.stack : undefined
+        logger.error({ event: 'web.handle.error', err: errorMsg, stack }, 'Error handling client message')
         sendToClient(ws, { type: 'error', message: `Agent error: ${errorMsg}` })
       }
       break
