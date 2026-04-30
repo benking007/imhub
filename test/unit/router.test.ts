@@ -214,6 +214,11 @@ describe('parseMessage', () => {
       expect(parseMessage('/workspaces list')).toEqual({ type: 'workspaces', args: 'list' })
       expect(parseMessage('/ws list')).toEqual({ type: 'workspaces', args: 'list' })
     })
+
+    it('parses /schedule and /cron as aliases (P2-F)', () => {
+      expect(parseMessage('/schedule list')).toEqual({ type: 'schedule', args: 'list' })
+      expect(parseMessage('/cron list')).toEqual({ type: 'schedule', args: 'list' })
+    })
   })
 })
 

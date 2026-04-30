@@ -11,6 +11,7 @@ import { handleAuditCommand } from './commands/audit.js'
 import { handleRouterCommand } from './commands/router.js'
 import { handleJobCommand } from './commands/job.js'
 import { handleWorkspacesCommand } from './commands/workspaces.js'
+import { handleScheduleCommand } from './commands/schedule.js'
 import { logInvocation } from './audit-log.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { classifyIntent } from './intent.js'
@@ -81,6 +82,7 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'audit') return { type: 'audit', args: rest }
   if (cmd === 'router') return { type: 'router', args: rest }
   if (cmd === 'workspaces' || cmd === 'ws') return { type: 'workspaces', args: rest }
+  if (cmd === 'schedule' || cmd === 'cron') return { type: 'schedule', args: rest }
   if (cmd === 'job' || cmd === 'task') return { type: 'job', args: rest }
   if (cmd === 'tasks') return { type: 'job', args: 'list' }
   if (cmd === 'check') return { type: 'job', args: `check ${rest}` }
@@ -129,6 +131,10 @@ export async function routeMessage(
 
     case 'workspaces': {
       return handleWorkspacesCommand(parsed.args, ctx)
+    }
+
+    case 'schedule': {
+      return handleScheduleCommand(parsed.args, ctx)
     }
 
     case 'job': {

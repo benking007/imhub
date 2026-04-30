@@ -87,6 +87,10 @@ program
       await registry.loadACPAgents(config.acpAgents)
     }
 
+    // Start the scheduler (runs cron-due schedules every 30s)
+    const { startScheduler } = await import('./core/schedule.js')
+    startScheduler()
+
     // ============================================
     // ONBOARDING CHECKS (before default fill!)
     // ============================================
