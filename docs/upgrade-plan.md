@@ -49,8 +49,8 @@
 
 - [x] Config schema 校验（zod）
 - [x] AgentBase 抽象
-- [ ] Router 拆分：命令分离到 `commands/*.ts`
-- [ ] Agent health 定期探活（替代永久缓存）
+- [x] Router 拆分：命令分离到 `commands/*.ts`
+- [x] Agent health 定期探活（替代永久缓存）
 
 ---
 
