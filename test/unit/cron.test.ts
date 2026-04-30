@@ -101,4 +101,31 @@ describe('nextOccurrence', () => {
     // 1st, so we just check next is in May.
     expect(next.getMonth()).toBe(4)  // May (0-indexed)
   })
+
+  it('yearly schedule resolves quickly via field-level fast-forward', () => {
+    // "00:00 on Jan 1" — used to require ~525K minute increments under
+    // the brute-force loop. With field-level skipping it should converge
+    // in tens of microseconds.
+    const spec = parseCron('0 0 1 1 *')
+    const from = new Date('2026-04-30T12:00:00')
+    const start = Date.now()
+    const next = nextOccurrence(spec, from)!
+    const elapsed = Date.now() - start
+    expect(next.getMonth()).toBe(0)   // January
+    expect(next.getDate()).toBe(1)
+    expect(next.getHours()).toBe(0)
+    expect(next.getMinutes()).toBe(0)
+    expect(next.getFullYear()).toBe(2027)
+    expect(elapsed).toBeLessThan(50)  // generous: was easily 100+ ms before
+  })
+
+  it('30-min step on every weekday at 9-18 lands at the next valid slot', () => {
+    const spec = parseCron('*/30 9-18 * * 1-5')
+    // Saturday afternoon — must skip to Monday 09:00.
+    const sat = new Date(2026, 4, 2, 14, 17)  // 2026-05-02 (Sat) 14:17
+    const next = nextOccurrence(spec, sat)!
+    expect(next.getDay()).toBe(1)  // Monday
+    expect(next.getHours()).toBe(9)
+    expect(next.getMinutes()).toBe(0)
+  })
 })

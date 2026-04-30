@@ -100,28 +100,26 @@ export function parseCron(expr: string): CronSpec {
   }
 }
 
-/** Next firing strictly after `from`, computed by minute-by-minute scan. */
-export function nextOccurrence(spec: CronSpec, from: Date = new Date()): Date | null {
-  // Start at the minute after `from` to ensure strictness.
-  const cur = new Date(from)
-  cur.setSeconds(0, 0)
-  cur.setMinutes(cur.getMinutes() + 1)
-
-  // Hard cap: 6 years × 366 × 24 × 60 ≈ 3.2M minutes. We bail at 8M to
-  // guarantee termination on degenerate inputs (e.g. Feb 30).
-  const HARD_CAP = 8_000_000
-  for (let i = 0; i < HARD_CAP; i++) {
-    if (matches(spec, cur)) return new Date(cur)
-    cur.setMinutes(cur.getMinutes() + 1)
+/**
+ * Smallest value in `values` that is ≥ target, or null if none.
+ * The set is iterated linearly; sizes are tiny (≤ 60) so the cost is
+ * negligible vs the surrounding work.
+ */
+function ceilingIn(values: Set<number>, target: number): number | null {
+  let best: number | null = null
+  for (const v of values) {
+    if (v >= target && (best === null || v < best)) best = v
   }
-  return null
+  return best
 }
 
-function matches(spec: CronSpec, d: Date): boolean {
-  if (!spec.minute.values.has(d.getMinutes())) return false
-  if (!spec.hour.values.has(d.getHours())) return false
-  if (!spec.month.values.has(d.getMonth() + 1)) return false
-  // Cron quirk: when both day and dow are restricted, EITHER matches.
+function firstIn(values: Set<number>): number {
+  let best = Infinity
+  for (const v of values) if (v < best) best = v
+  return best
+}
+
+function dayMatches(spec: CronSpec, d: Date): boolean {
   const dayWild = spec.day.raw === '*'
   const dowWild = spec.dow.raw === '*'
   const dayOk = spec.day.values.has(d.getDate())
@@ -130,4 +128,77 @@ function matches(spec: CronSpec, d: Date): boolean {
   if (!dayWild && dowWild) return dayOk
   if (dayWild && !dowWild) return dowOk
   return dayOk || dowOk
+}
+
+/**
+ * Next firing strictly after `from`, found by field-level
+ * fast-forwarding. For "yearly at midnight Jan 1" (`0 0 1 1 *`) this
+ * converges in at most 4-5 jumps, vs ~525_000 minute increments under
+ * the previous brute-force loop.
+ *
+ * The loop walks fields outermost (month) → innermost (minute). On a
+ * mismatch we set the field to its ceiling (next valid value) and reset
+ * everything inside it. If no ceiling exists in the current scope we
+ * step one unit up in the parent field. JavaScript Date handles
+ * carries (month=12 → next year, hour=24 → next day) natively.
+ */
+export function nextOccurrence(spec: CronSpec, from: Date = new Date()): Date | null {
+  const cur = new Date(from)
+  cur.setSeconds(0, 0)
+  cur.setMinutes(cur.getMinutes() + 1)
+
+  // Sane upper bound: 1000 field jumps will resolve any 5-field spec —
+  // crontab can't repeat itself within that many adjustments.
+  for (let i = 0; i < 1000; i++) {
+    // 1) Month
+    const mthIdx = cur.getMonth() + 1  // 1-indexed
+    const mthCeil = ceilingIn(spec.month.values, mthIdx)
+    if (mthCeil === null) {
+      // No matching month this year — roll to next year's first valid month.
+      cur.setFullYear(cur.getFullYear() + 1, firstIn(spec.month.values) - 1, 1)
+      cur.setHours(0, 0, 0, 0)
+      continue
+    }
+    if (mthCeil !== mthIdx) {
+      cur.setMonth(mthCeil - 1, 1)
+      cur.setHours(0, 0, 0, 0)
+      continue
+    }
+
+    // 2) Day (handle the day-OR-dow quirk through dayMatches)
+    if (!dayMatches(spec, cur)) {
+      cur.setDate(cur.getDate() + 1)
+      cur.setHours(0, 0, 0, 0)
+      continue
+    }
+
+    // 3) Hour
+    const hr = cur.getHours()
+    const hrCeil = ceilingIn(spec.hour.values, hr)
+    if (hrCeil === null) {
+      cur.setDate(cur.getDate() + 1)
+      cur.setHours(0, 0, 0, 0)
+      continue
+    }
+    if (hrCeil !== hr) {
+      cur.setHours(hrCeil, 0, 0, 0)
+      continue
+    }
+
+    // 4) Minute
+    const mn = cur.getMinutes()
+    const mnCeil = ceilingIn(spec.minute.values, mn)
+    if (mnCeil === null) {
+      cur.setHours(cur.getHours() + 1, 0, 0, 0)
+      continue
+    }
+    if (mnCeil !== mn) {
+      cur.setMinutes(mnCeil, 0, 0)
+      continue
+    }
+
+    // All four fields are valid simultaneously — done.
+    return new Date(cur)
+  }
+  return null
 }
