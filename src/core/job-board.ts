@@ -3,15 +3,14 @@
 // Jobs survive restarts. Each job executes an agent invocation and stores the result.
 // Supports: create, list, get, cancel.
 
-import Database from 'better-sqlite3'
+import type Database from 'better-sqlite3'
 import { homedir } from 'os'
 import { join } from 'path'
-import { mkdirSync } from 'fs'
 import type { Logger } from 'pino'
 import { logger as rootLogger } from './logger.js'
+import { createSqliteHelper } from './sqlite-helper.js'
 
-const BOARD_DIR = join(homedir(), '.im-hub')
-const BOARD_DB = join(BOARD_DIR, 'jobs.db')
+const BOARD_DB = join(homedir(), '.im-hub', 'jobs.db')
 
 /** Hard cap on concurrent runJob() invocations. Spawning more than this
  * would let a few /job run X requests OOM the host (each agent process
@@ -24,9 +23,6 @@ function resolveMaxConcurrent(): number {
   }
   return 3
 }
-
-let db: Database.Database | null = null
-let dbBroken = false
 
 // Running job controllers (for cancellation)
 const runningControllers = new Map<number, AbortController>()
@@ -73,41 +69,29 @@ interface JobRunner {
   (job: Job, logger: Logger, signal: AbortSignal): AsyncGenerator<string>
 }
 
+const helper = createSqliteHelper({
+  file: BOARD_DB,
+  component: 'job-board',
+  logger: rootLogger,
+  schema: `
+    CREATE TABLE IF NOT EXISTS jobs (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent       TEXT    NOT NULL,
+      prompt      TEXT    NOT NULL,
+      status      TEXT    NOT NULL DEFAULT 'pending',
+      result      TEXT,
+      error       TEXT,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT
+    );
+  `,
+  // First-time / cold-start cleanup: any 'running' rows are leftover
+  // from a prior process that didn't get to finalize.
+  init: (d) => reapStaleRunning(d),
+})
+
 function getDb(): Database.Database | null {
-  if (dbBroken) return null
-  if (!db) {
-    try {
-      mkdirSync(BOARD_DIR, { recursive: true })
-      db = new Database(BOARD_DB)
-      db.pragma('journal_mode = WAL')
-      db.pragma('synchronous = NORMAL')
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS jobs (
-          id          INTEGER PRIMARY KEY AUTOINCREMENT,
-          agent       TEXT    NOT NULL,
-          prompt      TEXT    NOT NULL,
-          status      TEXT    NOT NULL DEFAULT 'pending',
-          result      TEXT,
-          error       TEXT,
-          created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-          completed_at TEXT
-        );
-      `)
-      // First-time / cold-start cleanup: any 'running' rows are leftover
-      // from a prior process that didn't get to finalize.
-      reapStaleRunning(db)
-    } catch (err) {
-      dbBroken = true
-      db = null
-      const msg = err instanceof Error ? err.message : String(err)
-      if (process.env.LOG_LEVEL !== 'silent') {
-        rootLogger.warn({ event: 'job-board.disabled', error: msg },
-          `[job-board] disabled: ${msg}`)
-      }
-      return null
-    }
-  }
-  return db
+  return helper.get()
 }
 
 export function createJob(agent: string, prompt: string): number {

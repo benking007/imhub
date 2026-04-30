@@ -6,25 +6,22 @@
 // the same API but persists nothing — exact same fail-soft pattern as
 // audit-log + job-board.
 
-import Database from 'better-sqlite3'
+import type Database from 'better-sqlite3'
 import { homedir } from 'os'
 import { join } from 'path'
-import { mkdirSync } from 'fs'
 import type { Logger } from 'pino'
 import { logger as rootLogger } from './logger.js'
 import { parseCron, nextOccurrence } from './cron.js'
 import { createJob, runJob } from './job-board.js'
 import { registry } from './registry.js'
 import { AgentBase } from './agent-base.js'
+import { createSqliteHelper } from './sqlite-helper.js'
 
-const SCHED_DIR = join(homedir(), '.im-hub')
-const SCHED_DB = join(SCHED_DIR, 'schedules.db')
+const SCHED_DB = join(homedir(), '.im-hub', 'schedules.db')
 const TICK_INTERVAL_MS = 30 * 1000
 
 const log = rootLogger.child({ component: 'schedule' })
 
-let db: Database.Database | null = null
-let dbBroken = false
 let tickTimer: ReturnType<typeof setInterval> | null = null
 
 export interface Schedule {
@@ -40,38 +37,29 @@ export interface Schedule {
   created_at: string
 }
 
+const helper = createSqliteHelper({
+  file: SCHED_DB,
+  component: 'schedule',
+  logger: rootLogger,
+  schema: `
+    CREATE TABLE IF NOT EXISTS schedules (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT    NOT NULL,
+      agent       TEXT    NOT NULL,
+      prompt      TEXT    NOT NULL,
+      cron        TEXT    NOT NULL,
+      enabled     INTEGER NOT NULL DEFAULT 1,
+      next_run    TEXT    NOT NULL,
+      last_run    TEXT,
+      notify_url  TEXT,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sched_next ON schedules(next_run, enabled);
+  `,
+})
+
 function getDb(): Database.Database | null {
-  if (dbBroken) return null
-  if (!db) {
-    try {
-      mkdirSync(SCHED_DIR, { recursive: true })
-      db = new Database(SCHED_DB)
-      db.pragma('journal_mode = WAL')
-      db.pragma('synchronous = NORMAL')
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS schedules (
-          id          INTEGER PRIMARY KEY AUTOINCREMENT,
-          name        TEXT    NOT NULL,
-          agent       TEXT    NOT NULL,
-          prompt      TEXT    NOT NULL,
-          cron        TEXT    NOT NULL,
-          enabled     INTEGER NOT NULL DEFAULT 1,
-          next_run    TEXT    NOT NULL,
-          last_run    TEXT,
-          notify_url  TEXT,
-          created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_sched_next ON schedules(next_run, enabled);
-      `)
-    } catch (err) {
-      dbBroken = true
-      db = null
-      log.warn({ event: 'schedule.disabled', error: err instanceof Error ? err.message : String(err) },
-        'schedule disabled (SQLite unavailable)')
-      return null
-    }
-  }
-  return db
+  return helper.get()
 }
 
 export interface CreateScheduleInput {

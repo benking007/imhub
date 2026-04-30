@@ -3,17 +3,16 @@
 // Schema: one row per agent invocation with trace id, user, platform, cost, duration etc.
 // Reuses the traceId from structured logging.
 
-import Database from 'better-sqlite3'
+import type Database from 'better-sqlite3'
 import { homedir } from 'os'
 import { join } from 'path'
-import { mkdirSync } from 'fs'
 import { logger as rootLogger } from './logger.js'
 import { recordInvocation } from './metrics.js'
+import { createSqliteHelper } from './sqlite-helper.js'
 
 const log = rootLogger.child({ component: 'audit-log' })
 
-const AUDIT_DIR = join(homedir(), '.im-hub')
-const AUDIT_DB = join(AUDIT_DIR, 'audit.db')
+const AUDIT_DB = join(homedir(), '.im-hub', 'audit.db')
 
 /** Default number of days to keep audit rows. Override via env. */
 function resolveRetentionDays(): number {
@@ -28,63 +27,51 @@ function resolveRetentionDays(): number {
 /** How often to run the retention sweep (epoch-ms). 0 disables. */
 const RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000  // 6 hours
 
-let db: Database.Database | null = null
-let dbBroken = false
 let sweepTimer: ReturnType<typeof setInterval> | null = null
 
-function getDb(): Database.Database | null {
-  if (dbBroken) return null
-  if (!db) {
-    try {
-      mkdirSync(AUDIT_DIR, { recursive: true })
-      db = new Database(AUDIT_DB)
-      db.pragma('journal_mode = WAL')
-      db.pragma('synchronous = NORMAL')
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS invocations (
-          id        INTEGER PRIMARY KEY AUTOINCREMENT,
-          trace_id  TEXT    NOT NULL,
-          ts        TEXT    NOT NULL DEFAULT (datetime('now')),
-          user_id   TEXT    NOT NULL DEFAULT '',
-          platform  TEXT    NOT NULL DEFAULT '',
-          agent     TEXT    NOT NULL,
-          intent    TEXT    NOT NULL DEFAULT 'default',
-          prompt_len INTEGER NOT NULL DEFAULT 0,
-          response_len INTEGER NOT NULL DEFAULT 0,
-          duration_ms INTEGER NOT NULL DEFAULT 0,
-          cost      REAL    NOT NULL DEFAULT 0.0,
-          success   INTEGER NOT NULL DEFAULT 1,
-          error     TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_inv_ts ON invocations(ts);
-        CREATE INDEX IF NOT EXISTS idx_inv_agent ON invocations(agent);
-        CREATE INDEX IF NOT EXISTS idx_inv_trace ON invocations(trace_id);
-        CREATE INDEX IF NOT EXISTS idx_inv_user ON invocations(user_id);
-        CREATE INDEX IF NOT EXISTS idx_inv_platform ON invocations(platform);
-        CREATE INDEX IF NOT EXISTS idx_inv_intent ON invocations(intent);
-      `)
-      // Run a sweep on first init, then on a 6h timer.
-      pruneExpired(db)
-      if (RETENTION_SWEEP_INTERVAL_MS > 0 && sweepTimer === null) {
-        sweepTimer = setInterval(() => {
-          if (db) pruneExpired(db)
-        }, RETENTION_SWEEP_INTERVAL_MS)
-        // Don't keep the process alive just for sweeping.
-        if (typeof sweepTimer === 'object' && sweepTimer && 'unref' in sweepTimer) {
-          (sweepTimer as { unref: () => void }).unref()
-        }
+const helper = createSqliteHelper({
+  file: AUDIT_DB,
+  component: 'audit-log',
+  logger: rootLogger,
+  schema: `
+    CREATE TABLE IF NOT EXISTS invocations (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      trace_id  TEXT    NOT NULL,
+      ts        TEXT    NOT NULL DEFAULT (datetime('now')),
+      user_id   TEXT    NOT NULL DEFAULT '',
+      platform  TEXT    NOT NULL DEFAULT '',
+      agent     TEXT    NOT NULL,
+      intent    TEXT    NOT NULL DEFAULT 'default',
+      prompt_len INTEGER NOT NULL DEFAULT 0,
+      response_len INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      cost      REAL    NOT NULL DEFAULT 0.0,
+      success   INTEGER NOT NULL DEFAULT 1,
+      error     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_inv_ts ON invocations(ts);
+    CREATE INDEX IF NOT EXISTS idx_inv_agent ON invocations(agent);
+    CREATE INDEX IF NOT EXISTS idx_inv_trace ON invocations(trace_id);
+    CREATE INDEX IF NOT EXISTS idx_inv_user ON invocations(user_id);
+    CREATE INDEX IF NOT EXISTS idx_inv_platform ON invocations(platform);
+    CREATE INDEX IF NOT EXISTS idx_inv_intent ON invocations(intent);
+  `,
+  init: (d) => {
+    pruneExpired(d)
+    if (RETENTION_SWEEP_INTERVAL_MS > 0 && sweepTimer === null) {
+      sweepTimer = setInterval(() => {
+        const live = helper.get()
+        if (live) pruneExpired(live)
+      }, RETENTION_SWEEP_INTERVAL_MS)
+      if (typeof sweepTimer === 'object' && sweepTimer && 'unref' in sweepTimer) {
+        (sweepTimer as { unref: () => void }).unref()
       }
-    } catch (err) {
-      // Native module unavailable (bun runtime) or disk error — skip auditing,
-      // never fail the request pipeline.
-      dbBroken = true
-      db = null
-      const msg = err instanceof Error ? err.message : String(err)
-      log.warn({ event: 'audit-log.disabled', error: msg }, `audit-log disabled: ${msg}`)
-      return null
     }
-  }
-  return db
+  },
+})
+
+function getDb(): Database.Database | null {
+  return helper.get()
 }
 
 export interface AuditRecord {

@@ -107,4 +107,26 @@ describe('LLM judge', () => {
     configureLLMJudge({ agentName: 'manually-set' })
     expect(getLLMJudge()?.agentName).toBe('manually-set')
   })
+
+  it('LRU cache enforces a hard size cap (no unbounded growth)', async () => {
+    configureLLMJudge({ agentName: 'judge' })
+    const judge: AgentAdapter = {
+      name: 'judge', aliases: [],
+      isAvailable: async () => true,
+      sendPrompt: async function* (_id, prompt) {
+        // Echo back the first candidate to make every call resolve.
+        const m = prompt.match(/- (\S+)/)
+        yield m?.[1] || 'a'
+      },
+    }
+    const resolve = (n: string) => n === 'judge' ? judge : undefined
+
+    // Issue many distinct prompts so each gets a unique cache key.
+    // The default cap is 1000; we send 1100 to verify eviction kicks in.
+    for (let i = 0; i < 1100; i++) {
+      await classifyWithLLM(`prompt-${i}`, ['a', 'b'], resolve)
+    }
+    const { _cacheSize } = await import('../../src/core/intent-llm')
+    expect(_cacheSize()).toBeLessThanOrEqual(1000)
+  })
 })

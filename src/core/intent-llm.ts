@@ -15,6 +15,7 @@ import { logger as rootLogger } from './logger.js'
 const log = rootLogger.child({ component: 'intent-llm' })
 
 const CACHE_TTL_MS = 10 * 60 * 1000
+const CACHE_MAX_ENTRIES = 1000  // LRU upper bound prevents unbounded growth
 const RESPONSE_TIMEOUT_MS = 5_000
 
 interface CachedDecision {
@@ -23,7 +24,44 @@ interface CachedDecision {
   ts: number
 }
 
-const cache = new Map<string, CachedDecision>()
+/**
+ * LRU cache: insertion-order Map; on access we delete + re-set to bump
+ * the entry to the end. When size exceeds max we evict the head (the
+ * oldest unused entry).
+ */
+class LRUCache<K, V extends { ts: number }> {
+  private store = new Map<K, V>()
+  constructor(private readonly maxSize: number, private readonly ttlMs: number) {}
+
+  get(key: K): V | undefined {
+    const v = this.store.get(key)
+    if (!v) return undefined
+    if (Date.now() - v.ts > this.ttlMs) {
+      this.store.delete(key)
+      return undefined
+    }
+    // Touch — move to end of insertion order
+    this.store.delete(key)
+    this.store.set(key, v)
+    return v
+  }
+
+  set(key: K, value: V): void {
+    if (this.store.has(key)) this.store.delete(key)
+    this.store.set(key, value)
+    // Evict from the head until under cap
+    while (this.store.size > this.maxSize) {
+      const first = this.store.keys().next().value as K | undefined
+      if (first === undefined) break
+      this.store.delete(first)
+    }
+  }
+
+  clear(): void { this.store.clear() }
+  get size(): number { return this.store.size }
+}
+
+const cache = new LRUCache<string, CachedDecision>(CACHE_MAX_ENTRIES, CACHE_TTL_MS)
 
 export interface LLMJudgeConfig {
   /** Agent name used as the judge. Must already be registered. */
@@ -93,7 +131,7 @@ export async function classifyWithLLM(
 
   const key = makeKey(text, candidates)
   const cached = cache.get(key)
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+  if (cached) {
     return { agent: cached.agent, reason: `${cached.reason} (cached)` }
   }
 
@@ -146,3 +184,6 @@ export async function classifyWithLLM(
 export function _clearLLMCache(): void {
   cache.clear()
 }
+
+/** Test/diagnostic: current cache size. */
+export function _cacheSize(): number { return cache.size }
