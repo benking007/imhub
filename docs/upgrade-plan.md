@@ -88,23 +88,23 @@
 
 > 目标：多租户、多上下游、完整生命周期管理。
 
-### 3.1 多租户
+### 3.1 ACP 深化
 
-- [ ] Multi-tenant registry（按 workspace 隔离）
-- [ ] RBAC：IM 用户 → role → agent/quota 绑定
-- [ ] Per-workspace config、session、audit 隔离
-
-### 3.2 ACP 深化
-
-- [ ] ACP Server 模式：im-hub 本身可作为 Agent 被上游调用
+- [x] ACP Server 模式：im-hub 本身可作为 Agent 被上游调用
 - [ ] ACP Client session 保持（跨越 HTTP 无状态）
 - [ ] ACP agent 发现与自动注册
 
+### 3.2 多租户
+
+- [x] Multi-tenant registry（按 workspace 隔离 + agent 白名单）
+- [x] RBAC 基础：按 userId 解析 workspace
+
 ### 3.3 Job Board
 
-- [ ] 升级版子任务系统：Web UI 任务列表 / 调度 / 重跑 / 导出
+- [x] 升级版子任务系统：SQLite 持久化
+- [x] /job create/list/check/run/cancel
+- [ ] Web UI 任务列表 / 调度 / 重跑 / 导出
 - [ ] 定时任务（cron 触发） + webhook 回调
-- [ ] 长任务状态持久化与恢复
 
 ### 3.4 下游网关
 
