@@ -1,9 +1,11 @@
 // Web chat server — HTTP + WebSocket for browser-based agent interaction
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { homedir } from 'os'
+import { randomBytes } from 'crypto'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { parseMessage, routeMessage } from '../core/router.js'
 import { sessionManager } from '../core/session.js'
@@ -18,6 +20,28 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_DIR = join(__dirname, 'public')
 const DEFAULT_PORT = 3000
+const WEB_TOKEN_DIR = join(homedir(), '.im-hub')
+const WEB_TOKEN_FILE = join(WEB_TOKEN_DIR, 'web-token')
+
+function generateToken(): string {
+  return randomBytes(32).toString('hex')
+}
+
+function getOrCreateWebToken(): string {
+  try {
+    return readFileSync(WEB_TOKEN_FILE, 'utf-8').trim()
+  } catch {
+    const token = generateToken()
+    mkdirSync(WEB_TOKEN_DIR, { recursive: true })
+    writeFileSync(WEB_TOKEN_FILE, token, { mode: 0o600 })
+    return token
+  }
+}
+
+function isMasked(value: string | undefined): boolean {
+  if (!value) return false
+  return /^.{0,2}\*{2,}.{0,2}$/.test(value)
+}
 
 interface ClientConnection {
   ws: WebSocket
@@ -33,6 +57,7 @@ export async function startWebServer(options: {
   defaultAgent: string
 }): Promise<{ close: () => void; port: number }> {
   const port = options.port || DEFAULT_PORT
+  const webToken = getOrCreateWebToken()
   const clients = new Map<string, ClientConnection>()
 
   // HTTP request handler — static files + REST API
@@ -41,10 +66,20 @@ export async function startWebServer(options: {
 
     // Static pages
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      return serveStatic(res, join(PUBLIC_DIR, 'index.html'), 'text/html')
+      return serveIndexHtml(res, join(PUBLIC_DIR, 'index.html'), webToken)
     }
     if (url.pathname === '/settings' || url.pathname === '/settings.html') {
-      return serveStatic(res, join(PUBLIC_DIR, 'settings.html'), 'text/html')
+      return serveIndexHtml(res, join(PUBLIC_DIR, 'settings.html'), webToken)
+    }
+
+    // REST API — require auth token
+    if (url.pathname.startsWith('/api/')) {
+      const token = req.headers['x-im-hub-token'] as string || ''
+      if (token !== webToken) {
+        res.writeHead(401)
+        res.end(JSON.stringify({ error: 'Unauthorized' }))
+        return
+      }
     }
 
     // REST API
@@ -107,10 +142,10 @@ export async function startWebServer(options: {
     })
   })
 
-  // Start listening
+  // Start listening (loopback only by default)
   await new Promise<void>((resolve, reject) => {
     httpServer.on('error', reject)
-    httpServer.listen(port, () => resolve())
+    httpServer.listen(port, '127.0.0.1', () => resolve())
   })
 
   console.log(`[Web] Chat UI available at http://localhost:${port}`)
@@ -165,15 +200,18 @@ async function handleGetConfig(_req: IncomingMessage, res: ServerResponse): Prom
 async function handlePutConfig(req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
     const body = await readBody(req)
-    const incoming = JSON.parse(body) as Config
+    const incoming = JSON.parse(body) as Record<string, unknown>
 
-    // Merge with existing config — only overwrite fields that are present
     const existing = await loadConfig()
 
-    // Simple merge: incoming fields overwrite existing
-    const merged: Config = {
-      ...existing,
-      ...incoming,
+    const merged: Config = { ...existing }
+
+    for (const key of Object.keys(incoming)) {
+      const val = incoming[key]
+      if (typeof val === 'string' && isMasked(val)) {
+        continue
+      }
+      (merged as Record<string, unknown>)[key] = val
     }
 
     await saveConfig(merged)
@@ -367,7 +405,7 @@ function sendToClient(ws: WebSocket, data: Record<string, unknown>): void {
 }
 
 /**
- * Serve a static file
+ * Serve a static file (no token injection needed)
  */
 function serveStatic(res: ServerResponse, filePath: string, contentType: string): void {
   if (!existsSync(filePath)) {
@@ -378,4 +416,19 @@ function serveStatic(res: ServerResponse, filePath: string, contentType: string)
   const content = readFileSync(filePath)
   res.writeHead(200, { 'Content-Type': contentType })
   res.end(content)
+}
+
+/**
+ * Serve index/settings HTML with injected web token for API auth
+ */
+function serveIndexHtml(res: ServerResponse, filePath: string, token: string): void {
+  if (!existsSync(filePath)) {
+    res.writeHead(404)
+    res.end('Not found')
+    return
+  }
+  let html = readFileSync(filePath, 'utf-8')
+  html = html.replace('</head>', `<script>window.IMHUB_TOKEN='${token}';</script></head>`)
+  res.writeHead(200, { 'Content-Type': 'text/html' })
+  res.end(html)
 }

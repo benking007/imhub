@@ -1,11 +1,23 @@
 // Session manager — per-conversation state
 
+import { createHash } from 'crypto'
 import { homedir } from 'os'
 import { join } from 'path'
 import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
 import type { Session, ChatMessage } from './types.js'
 
 const SESSIONS_DIR = join(homedir(), '.im-hub', 'sessions')
+
+function sanitizeKey(raw: string): string {
+  return raw.replace(/[^A-Za-z0-9_-]/g, (c) => {
+    return createHash('sha256').update(c).digest('hex').slice(0, 8)
+  })
+}
+
+function sessionFilePath(key: string): string {
+  const safe = sanitizeKey(key)
+  return join(SESSIONS_DIR, `${safe}.json`)
+}
 const DEFAULT_TTL = 30 * 60 * 1000 // 30 minutes
 const CLEANUP_INTERVAL = 5 * 60 * 1000 // 5 minutes
 
@@ -212,7 +224,7 @@ class SessionManager {
   }
 
   private async saveSession(key: string, session: Session): Promise<void> {
-    const filePath = join(SESSIONS_DIR, `${key.replace(/:/g, '-')}.json`)
+    const filePath = sessionFilePath(key)
     try {
       await writeFile(filePath, JSON.stringify(session, null, 2))
     } catch {
@@ -221,7 +233,7 @@ class SessionManager {
   }
 
   private async loadSession(key: string): Promise<Session | undefined> {
-    const filePath = join(SESSIONS_DIR, `${key.replace(/:/g, '-')}.json`)
+    const filePath = sessionFilePath(key)
     try {
       const data = await readFile(filePath, 'utf-8')
       const session = JSON.parse(data) as Session
@@ -251,7 +263,7 @@ class SessionManager {
         this.sessions.delete(key)
 
         // Delete from disk
-        const filePath = join(SESSIONS_DIR, `${key.replace(/:/g, '-')}.json`)
+        const filePath = sessionFilePath(key)
         try {
           await unlink(filePath)
         } catch {

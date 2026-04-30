@@ -4,6 +4,15 @@
 import type { AgentAdapter, ChatMessage } from '../../../core/types.js'
 import { crossSpawn } from '../../../utils/cross-platform.js'
 
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
+
+function resolveTimeout(): number {
+  if (process.env.OPENCODE_TIMEOUT_MS) {
+    return parseInt(process.env.OPENCODE_TIMEOUT_MS, 10)
+  }
+  return DEFAULT_TIMEOUT_MS
+}
+
 interface OpenCodePart {
   type: string
   text?: string
@@ -63,6 +72,8 @@ Current request: ${prompt}`
   }
 
   private callOpenCode(prompt: string): Promise<string> {
+    const timeoutMs = resolveTimeout()
+
     return new Promise((resolve, reject) => {
       const proc = crossSpawn('opencode', [
         'run',
@@ -76,6 +87,20 @@ Current request: ${prompt}`
       let stderr = ''
       let fullText = ''
       let errorMessage = ''
+      let resolved = false
+
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true
+          proc.kill('SIGTERM')
+          setTimeout(() => {
+            try { proc.kill('SIGKILL') } catch { /* ignore */ }
+          }, 5000)
+          resolve(fullText.length
+            ? `${fullText}\n\n⚠️ 处理超时（已超过 ${Math.round(timeoutMs / 60000)} 分钟），以上为超时前已收到的部分结果。`
+            : `⚠️ 处理超时（已超过 ${Math.round(timeoutMs / 60000)} 分钟），agent 未能在规定时间内完成。请简化问题后重试。`)
+        }
+      }, timeoutMs)
 
       proc.stdout?.on('data', (data: Buffer) => {
         stdout += data.toString()
@@ -87,9 +112,8 @@ Current request: ${prompt}`
 
           try {
             const event: OpenCodeEvent = JSON.parse(line)
-            console.log('[OpenCode] Event:', JSON.stringify(event))
+            console.log('[OpenCode] Event type:', event.type)
 
-            // Capture error message
             if (event.type === 'error') {
               errorMessage = event.error || event.message || 'Unknown error'
             }
@@ -110,13 +134,18 @@ Current request: ${prompt}`
       })
 
       proc.on('error', (err) => {
+        if (resolved) return
+        resolved = true
+        clearTimeout(timer)
         reject(err)
       })
 
       proc.on('close', (code) => {
+        if (resolved) return
+        resolved = true
+        clearTimeout(timer)
         console.log('[OpenCode] Process closed, code:', code)
         if (code !== 0) {
-          // Return user-friendly error message
           let errorMsg = 'OpenCode 执行失败'
           if (errorMessage.includes('auth') || errorMessage.includes('login')) {
             errorMsg = 'OpenCode 未登录或认证已过期'
@@ -134,24 +163,12 @@ Current request: ${prompt}`
   }
 
   private extractText(event: OpenCodeEvent): string {
-    // Handle text events with part.text (OpenCode format)
     if (event.type === 'text' && event.part?.text) {
       return event.part.text
     }
 
-    // Handle content events
     if (event.type === 'content' && event.content) {
       return event.content
-    }
-
-    // Handle text events with direct text field
-    if (event.text) {
-      return event.text
-    }
-
-    // Handle message field
-    if (event.message) {
-      return event.message
     }
 
     return ''
