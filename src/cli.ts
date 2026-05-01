@@ -352,8 +352,13 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
       (parsed.type === 'default' || parsed.type === 'agent' || parsed.type === 'agentCommand') &&
       !looksLikeApproval
     if (willInvokeAgent && messenger.sendThinking) {
+      // Include the traceId so the user can grep logs for this exact run.
+      // Format intentional: 思考中 on line 1, (traceId) on line 2.
       try {
-        dismissThinking = await messenger.sendThinking(message.threadId, '🤔 思考中…')
+        dismissThinking = await messenger.sendThinking(
+          message.threadId,
+          `🤔 思考中…\n(${traceId})`,
+        )
       } catch (err) {
         logger.debug({ err: String(err) }, 'sendThinking failed')
       }
