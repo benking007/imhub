@@ -267,4 +267,117 @@ describe('Web REST API', () => {
       expect(text).toContain('Tasks')
     })
   })
+
+  describe('/api/bgjobs', () => {
+    // We point IMHUB_BGJOB_ROOTS at temp dirs we lay out ourselves so this
+    // test never touches the real ~/.claude/bgjobs.
+    let bgTmpA: string
+    let bgTmpB: string
+    const ORIGINAL = process.env.IMHUB_BGJOB_ROOTS
+
+    beforeAll(async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync } = await import('fs')
+      const { tmpdir } = await import('os')
+      const { join: pjoin } = await import('path')
+      bgTmpA = mkdtempSync(pjoin(tmpdir(), 'bgjobs-A-'))
+      bgTmpB = mkdtempSync(pjoin(tmpdir(), 'bgjobs-B-'))
+      // root A: 2 jobs in index
+      writeFileSync(pjoin(bgTmpA, 'index.json'), JSON.stringify({
+        jobs: [{ id: 'jA1' }, { id: 'jA2' }],
+      }))
+      mkdirSync(pjoin(bgTmpA, 'jA1'))
+      writeFileSync(pjoin(bgTmpA, 'jA1', 'meta.json'), JSON.stringify({
+        id: 'jA1', name: 'task-A1', status: 'running', pid: 11,
+        started_at: '2026-05-01T08:00:00+08:00', exit_code: null, ended_at: null,
+      }))
+      writeFileSync(pjoin(bgTmpA, 'jA1', 'log.txt'), 'a-line-1\na-line-2\n')
+      mkdirSync(pjoin(bgTmpA, 'jA2'))
+      writeFileSync(pjoin(bgTmpA, 'jA2', 'meta.json'), JSON.stringify({
+        id: 'jA2', name: 'task-A2', status: 'completed', pid: 12,
+        started_at: '2026-05-01T09:00:00+08:00', ended_at: '2026-05-01T09:01:00+08:00',
+        exit_code: 0,
+      }))
+      // root B: 1 job
+      mkdirSync(pjoin(bgTmpB, 'jB1'))
+      writeFileSync(pjoin(bgTmpB, 'jB1', 'meta.json'), JSON.stringify({
+        id: 'jB1', name: 'task-B1', status: 'failed', pid: 99,
+        started_at: '2026-05-01T07:00:00+08:00', ended_at: '2026-05-01T07:00:30+08:00',
+        exit_code: 1,
+      }))
+      process.env.IMHUB_BGJOB_ROOTS = `rootA=${bgTmpA},rootB=${bgTmpB}`
+    })
+
+    afterAll(async () => {
+      const { rmSync } = await import('fs')
+      rmSync(bgTmpA, { recursive: true, force: true })
+      rmSync(bgTmpB, { recursive: true, force: true })
+      if (ORIGINAL === undefined) delete process.env.IMHUB_BGJOB_ROOTS
+      else process.env.IMHUB_BGJOB_ROOTS = ORIGINAL
+    })
+
+    it('GET /api/bgjobs returns groups across all roots', async () => {
+      const res = await fetch(url('/api/bgjobs'), { headers: auth })
+      expect(res.status).toBe(200)
+      const body = await res.json() as { roots: Array<{ id: string }>; groups: Array<{ rootId: string; jobs: unknown[] }> }
+      const rootIds = body.roots.map((r) => r.id).sort()
+      expect(rootIds).toEqual(['rootA', 'rootB'])
+      const byId = Object.fromEntries(body.groups.map((g) => [g.rootId, g.jobs]))
+      expect(byId.rootA.length).toBe(2)
+      expect(byId.rootB.length).toBe(1)
+    })
+
+    it('GET /api/bgjobs?root=rootA returns just that root', async () => {
+      const res = await fetch(url('/api/bgjobs?root=rootA'), { headers: auth })
+      expect(res.status).toBe(200)
+      const body = await res.json() as { jobs: Array<{ id: string; rootId: string }> }
+      expect(body.jobs.length).toBe(2)
+      expect(body.jobs.every((j) => j.rootId === 'rootA')).toBe(true)
+    })
+
+    it('GET /api/bgjobs?root=missing returns 404', async () => {
+      const res = await fetch(url('/api/bgjobs?root=nope'), { headers: auth })
+      expect(res.status).toBe(404)
+    })
+
+    it('GET /api/bgjobs/:id?root=rootA&tail=N returns detail with log tail', async () => {
+      const res = await fetch(url('/api/bgjobs/jA1?root=rootA&tail=10'), { headers: auth })
+      expect(res.status).toBe(200)
+      const body = await res.json() as { job: { id: string; log_tail: string; cmd: string[] } }
+      expect(body.job.id).toBe('jA1')
+      expect(body.job.log_tail).toContain('a-line-1')
+      expect(body.job.log_tail).toContain('a-line-2')
+    })
+
+    it('GET /api/bgjobs/:id without root probes every configured root', async () => {
+      const res = await fetch(url('/api/bgjobs/jB1'), { headers: auth })
+      expect(res.status).toBe(200)
+      const body = await res.json() as { job: { id: string; rootId: string } }
+      expect(body.job.id).toBe('jB1')
+      expect(body.job.rootId).toBe('rootB')
+    })
+
+    it('GET /api/bgjobs/missing returns 404', async () => {
+      const res = await fetch(url('/api/bgjobs/no-such-id'), { headers: auth })
+      expect(res.status).toBe(404)
+    })
+
+    it('rejects without auth token', async () => {
+      const res = await fetch(url('/api/bgjobs'))
+      expect(res.status).toBe(401)
+    })
+  })
+
+  describe('/api/subtasks', () => {
+    it('GET returns the subtasks array', async () => {
+      const res = await fetch(url('/api/subtasks'), { headers: auth })
+      expect(res.status).toBe(200)
+      const body = await res.json() as { subtasks: unknown[] }
+      expect(Array.isArray(body.subtasks)).toBe(true)
+    })
+
+    it('rejects without auth token', async () => {
+      const res = await fetch(url('/api/subtasks'))
+      expect(res.status).toBe(401)
+    })
+  })
 })

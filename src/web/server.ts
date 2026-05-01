@@ -126,6 +126,20 @@ export async function startWebServer(options: {
       return handleCreateJob(req, res)
     }
 
+    // bgjobs (read-only view of ~/.claude/bgjobs and ~/.config/opencode/bgjobs)
+    if (url.pathname === '/api/bgjobs' && req.method === 'GET') {
+      return handleListBgjobs(req, res, url)
+    }
+    const bgjobIdMatch = url.pathname.match(/^\/api\/bgjobs\/([\w.-]+)$/)
+    if (bgjobIdMatch && req.method === 'GET') {
+      return handleGetBgjob(req, res, bgjobIdMatch[1], url)
+    }
+
+    // Subtasks (flattened view of session.subtasks across all conversations)
+    if (url.pathname === '/api/subtasks' && req.method === 'GET') {
+      return handleListSubtasks(req, res)
+    }
+
     // Schedules
     if (url.pathname === '/api/schedules' && req.method === 'GET') {
       return handleListSchedules(req, res)
@@ -560,6 +574,65 @@ async function handleListSchedules(_req: IncomingMessage, res: ServerResponse): 
   try {
     const { listSchedules } = await import('../core/schedule.js')
     sendJson(res, 200, { schedules: listSchedules() })
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+async function handleListBgjobs(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  try {
+    const { resolveRoots, listJobsForRoot, listAllJobs } = await import('../core/bgjob-reader.js')
+    const rootId = url.searchParams.get('root')
+    if (rootId) {
+      // Single-root view — used by the dashboard's root selector.
+      const root = resolveRoots().find((r) => r.id === rootId)
+      if (!root) { sendJson(res, 404, { error: `bgjob root "${rootId}" not configured` }); return }
+      const jobs = await listJobsForRoot(root)
+      sendJson(res, 200, { roots: [{ id: root.id, label: root.label, path: root.path }], jobs })
+      return
+    }
+    // No root specified: return all roots' metadata + jobs grouped by root.
+    const all = await listAllJobs()
+    sendJson(res, 200, {
+      roots: all.map(({ root }) => ({ id: root.id, label: root.label, path: root.path })),
+      groups: all.map(({ root, jobs }) => ({ rootId: root.id, jobs })),
+    })
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+async function handleGetBgjob(_req: IncomingMessage, res: ServerResponse, id: string, url: URL): Promise<void> {
+  try {
+    const { findRoot, getJobDetail, resolveRoots, listJobsForRoot } = await import('../core/bgjob-reader.js')
+    const tail = Math.min(Math.max(parseInt(url.searchParams.get('tail') || '200', 10) || 200, 1), 5000)
+    const rootId = url.searchParams.get('root')
+    if (rootId) {
+      const root = findRoot(rootId)
+      if (!root) { sendJson(res, 404, { error: `bgjob root "${rootId}" not configured` }); return }
+      const job = await getJobDetail(root, id, tail)
+      if (!job) { sendJson(res, 404, { error: 'Job not found' }); return }
+      sendJson(res, 200, { job })
+      return
+    }
+    // No root: try every configured root, return first hit.
+    for (const root of resolveRoots()) {
+      const summaries = await listJobsForRoot(root)
+      if (!summaries.some((s) => s.id === id)) continue
+      const job = await getJobDetail(root, id, tail)
+      if (job) { sendJson(res, 200, { job }); return }
+    }
+    sendJson(res, 404, { error: 'Job not found' })
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+async function handleListSubtasks(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const { sessionManager } = await import('../core/session.js')
+    const subtasks = await sessionManager.listAllSubtasks()
+    sendJson(res, 200, { subtasks })
   } catch (err) {
     sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
   }

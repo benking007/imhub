@@ -11,7 +11,7 @@
 import { createHash, randomBytes } from 'crypto'
 import { homedir } from 'os'
 import { join } from 'path'
-import { mkdir, readFile, writeFile, rename, unlink, appendFile } from 'fs/promises'
+import { mkdir, readFile, writeFile, rename, unlink, appendFile, readdir } from 'fs/promises'
 import type { Session, ChatMessage, SubtaskMeta } from './types.js'
 import { logger as rootLogger } from './logger.js'
 
@@ -347,6 +347,63 @@ class SessionManager {
     const key = `${platform}:${channelId}:${threadId}`
     const session = this.sessions.get(key) || await this.loadSession(key)
     return session?.subtasks || []
+  }
+
+  /**
+   * Scan all session files on disk and return every subtask, flattened, with
+   * its parent platform/channelId/threadId/agent attached so the dashboard
+   * can render subtasks across all conversations.
+   *
+   * Session files live as `<sanitized-key>.json` under SESSIONS_DIR. The
+   * sanitized key is one-way (sha256-prefix per non-alnum char), so we
+   * cannot reverse it — but each session file preserves the original
+   * platform/channelId/threadId fields, which is what we need.
+   */
+  async listAllSubtasks(): Promise<Array<SubtaskMeta & {
+    platform: string
+    channelId: string
+    threadId: string
+    parentAgent: string
+    parentSessionId: string
+  }>> {
+    let names: string[]
+    try {
+      names = await readdir(SESSIONS_DIR)
+    } catch {
+      return []
+    }
+    const out: Array<SubtaskMeta & {
+      platform: string
+      channelId: string
+      threadId: string
+      parentAgent: string
+      parentSessionId: string
+    }> = []
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue
+      try {
+        const raw = await readFile(join(SESSIONS_DIR, name), 'utf-8')
+        const parsed = JSON.parse(raw) as Partial<Session>
+        if (!parsed.subtasks?.length) continue
+        for (const st of parsed.subtasks) {
+          out.push({
+            ...st,
+            createdAt: st.createdAt ? new Date(st.createdAt) : new Date(0),
+            completedAt: st.completedAt ? new Date(st.completedAt) : undefined,
+            platform: parsed.platform || '',
+            channelId: parsed.channelId || '',
+            threadId: parsed.threadId || '',
+            parentAgent: parsed.agent || '',
+            parentSessionId: parsed.id || '',
+          })
+        }
+      } catch {
+        // skip corrupt session file
+      }
+    }
+    // newest first
+    out.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    return out
   }
 
   /**

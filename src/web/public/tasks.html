@@ -18,6 +18,8 @@
         backToChat: 'Chat',
         toSettings: 'Settings',
         tabsJobs: 'Jobs',
+        tabsBackground: 'Background',
+        tabsSubtasks: 'Subtasks',
         tabsSchedules: 'Schedules',
         loading: 'Loading...',
         statsTotal: 'Total',
@@ -55,6 +57,23 @@
         scheduleLast: 'Last run',
         promptCreate: 'Prompt for the new job',
         agentCreate: 'Agent (defaults to claude-code)',
+        bgRoot: 'Source',
+        bgName: 'Name',
+        bgStarted: 'Started',
+        bgEnded: 'Ended',
+        bgPid: 'PID',
+        bgExit: 'Exit',
+        bgRestart: 'Gen',
+        bgCommand: 'Command',
+        bgWorkdir: 'Workdir',
+        bgOutDir: 'Output',
+        bgLogTail: 'Log tail (last 200 lines)',
+        bgEmpty: 'No background jobs in this source. Use bgjob start to create one.',
+        subParent: 'Parent thread',
+        subAgent: 'Agent',
+        subPrompt: 'Prompt',
+        subCreated: 'Created',
+        subEmpty: 'No subtasks recorded. Use /job switch <id> in IM to spawn one.',
       },
       zh: {
         title: 'im-hub — 任务',
@@ -62,6 +81,8 @@
         backToChat: '对话',
         toSettings: '设置',
         tabsJobs: '任务',
+        tabsBackground: '后台脚本',
+        tabsSubtasks: '子任务',
         tabsSchedules: '定时',
         loading: '加载中...',
         statsTotal: '总计',
@@ -99,6 +120,23 @@
         scheduleLast: '上次',
         promptCreate: '输入任务内容',
         agentCreate: 'Agent (默认 claude-code)',
+        bgRoot: '来源',
+        bgName: '名称',
+        bgStarted: '启动',
+        bgEnded: '结束',
+        bgPid: 'PID',
+        bgExit: '退出码',
+        bgRestart: '代次',
+        bgCommand: '命令',
+        bgWorkdir: '工作目录',
+        bgOutDir: '输出目录',
+        bgLogTail: '日志尾部（最后 200 行）',
+        bgEmpty: '该来源下暂无后台任务。可在终端 bgjob start 启动。',
+        subParent: '所属会话',
+        subAgent: 'Agent',
+        subPrompt: '内容',
+        subCreated: '创建',
+        subEmpty: '暂无子任务。在 IM 内 /job switch <id> 可派生。',
       },
     };
     window.__t = T[window.__lang];
@@ -298,6 +336,8 @@
   <main>
     <div class="tabs">
       <button class="tab active" data-tab="jobs" id="tab-jobs"></button>
+      <button class="tab" data-tab="background" id="tab-background"></button>
+      <button class="tab" data-tab="subtasks" id="tab-subtasks"></button>
       <button class="tab" data-tab="schedules" id="tab-schedules"></button>
     </div>
 
@@ -319,6 +359,22 @@
       <div id="jobs-list"></div>
     </section>
 
+    <section id="background-pane" hidden>
+      <div class="toolbar">
+        <select id="bg-root-filter"></select>
+        <button id="btn-bg-refresh"></button>
+        <label><input type="checkbox" id="bg-auto-refresh" checked> <span id="lbl-bg-auto"></span></label>
+      </div>
+      <div id="bg-list"></div>
+    </section>
+
+    <section id="subtasks-pane" hidden>
+      <div class="toolbar">
+        <button id="btn-sub-refresh"></button>
+      </div>
+      <div id="sub-list"></div>
+    </section>
+
     <section id="schedules-pane" hidden>
       <div id="schedules-list"></div>
     </section>
@@ -338,7 +394,12 @@
     document.getElementById('lbl-chat').textContent = T.backToChat;
     document.getElementById('lbl-settings').textContent = T.toSettings;
     document.getElementById('tab-jobs').textContent = T.tabsJobs;
+    document.getElementById('tab-background').textContent = T.tabsBackground;
+    document.getElementById('tab-subtasks').textContent = T.tabsSubtasks;
     document.getElementById('tab-schedules').textContent = T.tabsSchedules;
+    document.getElementById('btn-bg-refresh').textContent = T.refresh;
+    document.getElementById('btn-sub-refresh').textContent = T.refresh;
+    document.getElementById('lbl-bg-auto').textContent = T.autoRefresh;
     document.getElementById('btn-refresh').textContent = T.refresh;
     document.getElementById('btn-new').textContent = T.newJob;
     document.getElementById('lbl-auto').textContent = T.autoRefresh;
@@ -358,8 +419,15 @@
         document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
         const tab = t.dataset.tab;
         document.getElementById('jobs-pane').hidden = tab !== 'jobs';
+        document.getElementById('background-pane').hidden = tab !== 'background';
+        document.getElementById('subtasks-pane').hidden = tab !== 'subtasks';
         document.getElementById('schedules-pane').hidden = tab !== 'schedules';
+        // Lazy-load on first activation; auto-refresh hooks below kick in too.
         if (tab === 'schedules') loadSchedules();
+        if (tab === 'background') { ensureBgRootsLoaded().then(loadBgjobs); }
+        if (tab === 'subtasks') loadSubtasks();
+        // Pause/resume auto-refresh so hidden tabs don't poll.
+        setupBgAutoRefresh();
       };
     });
 
@@ -564,6 +632,171 @@
         el.innerHTML = `<div class="empty">${T.error}: ${e.message}</div>`;
       }
     }
+
+    // ============================================
+    // Background jobs (Claude / opencode bgjob)
+    // ============================================
+
+    let bgRoots = null; // [{id, label, path}]
+
+    async function ensureBgRootsLoaded() {
+      if (bgRoots) return bgRoots;
+      const res = await api('/api/bgjobs');
+      bgRoots = res.roots || [];
+      const sel = document.getElementById('bg-root-filter');
+      sel.innerHTML = bgRoots.map(r =>
+        `<option value="${esc(r.id)}">${esc(r.label)} (${esc(r.path)})</option>`
+      ).join('');
+      sel.onchange = loadBgjobs;
+      return bgRoots;
+    }
+
+    function bgStatusPill(status) {
+      // Reuse pill colors heuristically — running/completed/failed are common,
+      // bgjob also emits 'killed', 'unknown', etc. Anything we don't know
+      // becomes the muted 'cancelled' style.
+      const known = ['pending', 'running', 'completed', 'failed', 'cancelled'];
+      const cls = known.includes(status) ? status : 'cancelled';
+      return `<span class="pill ${cls}">${esc(status)}</span>`;
+    }
+
+    function shortId(id) { return String(id).slice(0, 24); }
+
+    async function loadBgjobs() {
+      await ensureBgRootsLoaded();
+      const sel = document.getElementById('bg-root-filter');
+      const rootId = sel.value || (bgRoots[0] && bgRoots[0].id);
+      if (!rootId) {
+        document.getElementById('bg-list').innerHTML = `<div class="empty">${T.bgEmpty}</div>`;
+        return;
+      }
+      try {
+        const { jobs } = await api('/api/bgjobs?root=' + encodeURIComponent(rootId));
+        const el = document.getElementById('bg-list');
+        if (!jobs.length) { el.innerHTML = `<div class="empty">${T.bgEmpty}</div>`; return; }
+        el.innerHTML = `
+          <table>
+            <thead>
+              <tr>
+                <th>${T.bgName}</th>
+                <th>ID</th>
+                <th>${T.status}</th>
+                <th>${T.bgPid}</th>
+                <th>${T.bgStarted}</th>
+                <th>${T.bgEnded}</th>
+                <th>${T.bgExit}</th>
+                <th>${T.actions}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${jobs.map(j => `
+                <tr data-id="${esc(j.id)}">
+                  <td>${esc(j.name)}</td>
+                  <td><code title="${esc(j.id)}">${esc(shortId(j.id))}</code></td>
+                  <td>${bgStatusPill(j.status)}</td>
+                  <td>${j.pid ?? '-'}</td>
+                  <td>${fmtTime(j.started_at)}</td>
+                  <td>${fmtTime(j.ended_at)}</td>
+                  <td>${j.exit_code === null || j.exit_code === undefined ? '-' : j.exit_code}</td>
+                  <td class="row-actions">
+                    <button data-act="bg-view">${T.view}</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+        el.querySelectorAll('tr[data-id]').forEach(tr => {
+          const id = tr.dataset.id;
+          tr.querySelector('[data-act="bg-view"]').addEventListener('click', () => showBgjob(rootId, id));
+        });
+      } catch (e) {
+        document.getElementById('bg-list').innerHTML =
+          `<div class="empty">${T.error}: ${esc(e.message)}</div>`;
+      }
+    }
+
+    async function showBgjob(rootId, id) {
+      try {
+        const { job } = await api('/api/bgjobs/' + encodeURIComponent(id) + '?root=' + encodeURIComponent(rootId) + '&tail=200');
+        const m = document.getElementById('modal');
+        m.innerHTML = `
+          <h2>${T.details}</h2>
+          <p><strong>${T.bgName}:</strong> <code>${esc(job.name)}</code> · <strong>${T.status}:</strong> ${bgStatusPill(job.status)}</p>
+          <p><strong>ID:</strong> <code>${esc(job.id)}</code></p>
+          <p><strong>${T.bgRoot}:</strong> <code>${esc(job.rootId)}</code> · <strong>${T.bgPid}:</strong> ${job.pid ?? '-'} · <strong>${T.bgRestart}:</strong> ${job.restart_generation}</p>
+          <p><strong>${T.bgStarted}:</strong> ${fmtTime(job.started_at)}${job.ended_at ? ` · <strong>${T.bgEnded}:</strong> ${fmtTime(job.ended_at)}` : ''}${job.exit_code !== null && job.exit_code !== undefined ? ` · <strong>${T.bgExit}:</strong> ${job.exit_code}` : ''}</p>
+          ${job.cmd?.length ? `<h3>${T.bgCommand}</h3><pre>${esc(job.cmd.join(' '))}</pre>` : ''}
+          ${job.workdir ? `<p><strong>${T.bgWorkdir}:</strong> <code>${esc(job.workdir)}</code></p>` : ''}
+          ${job.out_dir ? `<p><strong>${T.bgOutDir}:</strong> <code>${esc(job.out_dir)}</code></p>` : ''}
+          ${job.log_tail !== null && job.log_tail !== undefined
+            ? `<h3>${T.bgLogTail}</h3><pre>${esc(job.log_tail) || '(empty)'}</pre>`
+            : ''}
+          <div class="modal-actions">
+            <button id="modal-close">${T.close}</button>
+          </div>
+        `;
+        document.getElementById('modal-bg').classList.add('show');
+        document.getElementById('modal-close').onclick = () =>
+          document.getElementById('modal-bg').classList.remove('show');
+      } catch (e) {
+        alert(`${T.error}: ${e.message}`);
+      }
+    }
+
+    document.getElementById('btn-bg-refresh').onclick = loadBgjobs;
+
+    let bgTimer = null;
+    function setupBgAutoRefresh() {
+      const onTab = !document.getElementById('background-pane').hidden;
+      const enabled = document.getElementById('bg-auto-refresh').checked && onTab;
+      if (bgTimer) { clearInterval(bgTimer); bgTimer = null; }
+      if (enabled) bgTimer = setInterval(loadBgjobs, 5000);
+    }
+    document.getElementById('bg-auto-refresh').onchange = setupBgAutoRefresh;
+
+    // ============================================
+    // Subtasks (flattened from session.subtasks)
+    // ============================================
+
+    async function loadSubtasks() {
+      const el = document.getElementById('sub-list');
+      el.innerHTML = `<div class="empty">${T.loading}</div>`;
+      try {
+        const { subtasks } = await api('/api/subtasks');
+        if (!subtasks.length) { el.innerHTML = `<div class="empty">${T.subEmpty}</div>`; return; }
+        el.innerHTML = `
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>${T.subAgent}</th>
+                <th>${T.subPrompt}</th>
+                <th>${T.status}</th>
+                <th>${T.subParent}</th>
+                <th>${T.subCreated}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${subtasks.map(s => `
+                <tr>
+                  <td>#${s.id}</td>
+                  <td><code>${esc(s.agent || '')}</code></td>
+                  <td class="truncate">${esc(s.prompt || '')}</td>
+                  <td>${statusPill(s.status || 'pending')}</td>
+                  <td><code title="${esc(s.platform + ':' + s.channelId + ':' + s.threadId)}">${esc(s.platform)}/${esc(s.threadId).slice(0, 12)}</code></td>
+                  <td>${fmtTime(s.createdAt)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      } catch (e) {
+        el.innerHTML = `<div class="empty">${T.error}: ${esc(e.message)}</div>`;
+      }
+    }
+
+    document.getElementById('btn-sub-refresh').onclick = loadSubtasks;
 
     // Initial load
     loadJobs();
