@@ -39,6 +39,16 @@ const log = rootLogger.child({ component: 'agent.claude-code' })
 
 const BASE_ARGS = ['--print', '--verbose', '--output-format', 'stream-json'] as const
 
+/** First call with a UUID: --session-id (creates the session under that id).
+ *  Subsequent calls: --resume (continues from existing). Mixing them up gets
+ *  you "Session ID already in use" or "session not found". */
+function sessionFlag(opts: AgentSendOpts): string[] {
+  if (!opts.agentSessionId) return []
+  return opts.agentSessionResume
+    ? ['--resume', opts.agentSessionId]
+    : ['--session-id', opts.agentSessionId]
+}
+
 interface ClaudeEvent {
   type: string
   message?: {
@@ -59,7 +69,7 @@ export class ClaudeCodeAdapter extends AgentBase {
    */
   protected buildArgs(prompt: string, opts: AgentSendOpts): string[] {
     return [
-      ...(opts.agentSessionId ? ['--session-id', opts.agentSessionId] : []),
+      ...sessionFlag(opts),
       ...BASE_ARGS,
       '--permission-mode', 'dontAsk',
       prompt,
@@ -125,7 +135,7 @@ export class ClaudeCodeAdapter extends AgentBase {
     // their own copy, so cleanup never deletes another spawn's tmpdir.
     return {
       args: [
-        ...(opts.agentSessionId ? ['--session-id', opts.agentSessionId] : []),
+        ...sessionFlag(opts),
         // ORDER MATTERS: --mcp-config takes <configs...> (variadic). Place it
         // before another `-X` flag so it sees exactly one file path, not the
         // prompt as a second config file.

@@ -234,6 +234,37 @@ class SessionManager {
   }
 
   /**
+   * Persist claude-code resumable session bookkeeping (UUID + primed flag).
+   * Returns the updated session, or undefined if no session exists yet for
+   * this thread. Caller is expected to ensure the session exists first.
+   */
+  async setClaudeSessionId(
+    platform: string, channelId: string, threadId: string,
+    claudeSessionId: string,
+  ): Promise<Session | undefined> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session) return undefined
+    session.claudeSessionId = claudeSessionId
+    session.lastActivity = new Date()
+    this.sessions.set(key, session)
+    await this.saveSessionMeta(key, session)
+    return session
+  }
+
+  async markClaudeSessionPrimed(
+    platform: string, channelId: string, threadId: string,
+  ): Promise<void> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session || session.claudeSessionPrimed) return
+    session.claudeSessionPrimed = true
+    session.lastActivity = new Date()
+    this.sessions.set(key, session)
+    await this.saveSessionMeta(key, session)
+  }
+
+  /**
    * Increment the per-session usage roll-up after a successful agent
    * invocation. Used by router.callAgentWithHistory to power /stats.
    */
@@ -279,6 +310,9 @@ class SessionManager {
       session.messages = []
       session.lastActivity = new Date()
       session.id = `${platform}-${channelId}-${threadId}-${Date.now()}-${randomBytes(4).toString('hex')}` // New session ID
+      // Forget the old claude session — /new should give a clean slate.
+      delete session.claudeSessionId
+      delete session.claudeSessionPrimed
       this.sessions.set(key, session)
       await this.saveSession(key, session)
       return session

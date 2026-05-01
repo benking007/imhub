@@ -358,20 +358,38 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     // can read parsed.agent directly; otherwise the active agent comes from
     // the existing sticky session (or default agent if none yet).
     let agentForRun: string | undefined
+    let claudeRunWillResume = false
     if (willInvokeAgent) {
+      const stickySession = await sessionManager.getExistingSession(
+        platform, ctx.channelId, message.threadId,
+      )
       if (parsed.type === 'agent') {
         agentForRun = parsed.agent
       } else {
-        const stickySession = await sessionManager.getExistingSession(
-          platform, ctx.channelId, message.threadId,
-        )
         agentForRun = stickySession?.agent || defaultAgent
       }
       if (agentForRun === 'claude-code') {
-        // UUID with format claude requires; user will see this in the
-        // placeholder and can later run `claude --resume <uuid>` to inspect
-        // or continue the run from their terminal.
-        routeCtx.agentSessionId = randomUUID()
+        // Reuse the same UUID across every claude turn in this im-hub
+        // session — that's what keeps the displayed id stable AND what
+        // gives the user a single `claude --resume <uuid>` they can run
+        // any time during the conversation.
+        let claudeId = stickySession?.claudeSessionId
+        if (!claudeId) {
+          claudeId = randomUUID()
+          // Make sure the session row exists, then persist the id on it.
+          await sessionManager.getOrCreateSession(
+            platform, ctx.channelId, message.threadId,
+            agentForRun,
+          )
+          await sessionManager.setClaudeSessionId(
+            platform, ctx.channelId, message.threadId, claudeId,
+          )
+        }
+        routeCtx.agentSessionId = claudeId
+        // First call uses --session-id (creates); subsequent uses --resume
+        // (continues). Track via claudeSessionPrimed on the session.
+        claudeRunWillResume = !!stickySession?.claudeSessionPrimed
+        routeCtx.agentSessionResume = claudeRunWillResume
       }
     }
 
@@ -384,6 +402,21 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
         )
       } catch (err) {
         logger.debug({ err: String(err) }, 'sendThinking failed')
+      }
+    }
+
+    // Mark primed BEFORE invoking claude. claude writes the session jsonl
+    // as soon as the run starts, so even if the run later errors we still
+    // need to use --resume on the next turn (or it'll error with "session
+    // already exists"). The flag is best-effort: if the spawn itself fails
+    // (claude binary missing) the user can /new to reset.
+    if (agentForRun === 'claude-code' && !claudeRunWillResume) {
+      try {
+        await sessionManager.markClaudeSessionPrimed(
+          platform, ctx.channelId, message.threadId,
+        )
+      } catch (err) {
+        logger.debug({ err: String(err) }, 'markClaudeSessionPrimed failed')
       }
     }
 

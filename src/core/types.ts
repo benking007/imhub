@@ -84,6 +84,14 @@ export interface Session {
   activeSubtaskId?: number | null
   subtasks?: SubtaskMeta[]
   subtaskCounter?: number
+  /** UUID we pre-allocate for the claude-code adapter so multiple turns in
+   *  the same im-hub conversation share one resumable claude session
+   *  (`claude --resume <uuid>`). Persists across restarts. */
+  claudeSessionId?: string
+  /** Set to true after the first successful claude-code run on this session.
+   *  cli uses it to decide between `--session-id` (fresh, allowed once) and
+   *  `--resume` (subsequent turns). Cleared by /new. */
+  claudeSessionPrimed?: boolean
 }
 
 export interface SessionUsage {
@@ -162,10 +170,15 @@ export interface AgentSendOpts {
   channelId?: string
   /** Optional UUID to bind to the agent's own resumable-session concept.
    *  Currently honoured by the claude-code adapter (passed as
-   *  `--session-id`) so the user can later run `claude --resume <uuid>`
-   *  to continue or inspect the run from their terminal. Other adapters
-   *  ignore this. */
+   *  `--session-id` for first call, `--resume` for subsequent calls) so
+   *  multi-turn IM conversations share one resumable claude session and
+   *  the user can later `claude --resume <uuid>` to continue from their
+   *  terminal. Other adapters ignore this. */
   agentSessionId?: string
+  /** When true, the adapter should resume an existing session under
+   *  `agentSessionId` rather than create a new one. claude-code translates
+   *  this to `--resume <uuid>` instead of `--session-id <uuid>`. */
+  agentSessionResume?: boolean
 }
 
 /**

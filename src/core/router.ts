@@ -41,6 +41,9 @@ export interface RouteContext {
    * IM message is about to invoke a claude-code run, so the placeholder
    * can show the same id the user will later use with `claude --resume`. */
   agentSessionId?: string
+  /** True when the adapter should --resume an existing session under
+   *  agentSessionId instead of creating a new one. */
+  agentSessionResume?: boolean
 }
 
 /** Built-in coding agent commands forwarded to the active agent */
@@ -359,7 +362,13 @@ export async function callAgentWithHistory(
   const startTime = Date.now()
   ctx.logger.info({ event: 'agent.invoke.start', agent: agent!.name, promptLen: prompt.length, historyLen: history.length })
 
-  const generator = agent!.sendPrompt(sessionId, prompt, history, {
+  // When we're resuming an existing claude session, claude already has the
+  // conversation log on disk — feeding history again would duplicate every
+  // prior turn in the model's view. Pass an empty history in that case so
+  // claude relies purely on its native session memory.
+  const effectiveHistory = ctx.agentSessionResume ? [] : history
+
+  const generator = agent!.sendPrompt(sessionId, prompt, effectiveHistory, {
     model,
     variant,
     threadId: ctx.threadId,
@@ -367,6 +376,7 @@ export async function callAgentWithHistory(
     userId: ctx.userId,
     channelId: ctx.channelId,
     agentSessionId: ctx.agentSessionId,
+    agentSessionResume: ctx.agentSessionResume,
   })
 
   return (async function* (): AsyncGenerator<string> {
