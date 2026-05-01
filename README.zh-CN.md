@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-**IM 到 AI Agent 的万能桥梁** — 将微信/飞书/Telegram 接入 Claude Code/Codex/Copilot/OpenCode，**或通过 ACP 接入任意自定义 Agent**。
+**IM 到 AI Agent 的万能桥梁** — 将微信 / 飞书 / Telegram / **Discord** 接入 Claude Code / Codex / Copilot / OpenCode，**或通过 ACP 接入任意自定义 Agent**。单 Node.js 进程，无需 Docker / Redis；自带浏览器仪表盘、持久化任务、多租户工作区，IM 端真正的"工具调用人审"。
 
 <p align="center">
   <img src="assets/banner.jpg" alt="im-hub banner" width="800">
@@ -28,36 +28,51 @@
 </p>
 
 <p align="center">
-  <b>Telegram</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <b>微信</b>
+  <b>Telegram</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <b>微信</b>
 </p>
 
 ```
 npm install -g im-hub
 im-hub config wechat   # 扫码登录微信
-im-hub start           # 启动桥接
+im-hub start           # 启动桥接 + Web UI（:3000）
 ```
 
-## Web 对话
+## 0.2.13 → 0.2.15 主要升级
 
-im-hub 内置 Web 界面，可直接在浏览器中与 Agent 对话。
+- **Discord 适配器**（基于 `discord.js` 的 Gateway WebSocket）
+- **工具调用人审（HITL）** — Claude 调工具时自动暂停，IM 同一会话回复 `y`/`n` 即可
+- **任务仪表盘** `/tasks`，新增 **Background**（Claude/opencode bgjobs）与 **Subtasks** 两个标签
+- **多租户 Workspace** — 每个工作区独立的 Agent 白名单 + 限流
+- **ACP Server 模式** — im-hub 自身作为 ACP 兼容 Agent（`POST /tasks`，sync + SSE）
+- **持久化 Job Board** + Cron 调度器（SQLite 落地，重启不丢）
+- **智能路由**：意图分类（中英文）、断路器、Sticky 会话
+- **结构化日志**（`pino`）+ 全链路 `traceId` + 审计日志 + Prometheus `/api/metrics`
+
+完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+## Web 对话与任务仪表盘
 
 ```
 im-hub start           # 启动后访问 http://localhost:3000
+                       #   /          对话
+                       #   /tasks     jobs · 调度 · bgjobs · subtasks
+                       #   /settings  Agent · 通道 · ACP
 ```
 
-功能：
-- 通过 WebSocket 实时流式响应
+- WebSocket 实时流式响应
 - Agent 切换与对话历史
-- 设置页面管理 Agent、消息通道和 ACP 连接
-- 双语界面（中文 / English）——自动检测浏览器语言
+- 中英双语界面，自动检测浏览器语言
+- `/tasks` 同时展示持久化任务、cron 调度、**`~/.claude/bgjobs`** + **`~/.config/opencode/bgjobs`** 的后台任务（可用 `IMHUB_BGJOB_ROOTS` 覆盖）以及所有会话中的 subtask 平铺列表
 
 ## 核心特性
 
-- **多路复用** — 一个实例，同时对接多个 IM 和多个 Agent
-- **自定义 Agent 接入** — 通过 [ACP 协议](https://agentcommunicationprotocol.dev)连接任意 Agent，只需 `im-hub config agent`
-- **插件架构** — 轻松扩展新的 IM 通道或 Agent
-- **原生 TypeScript** — 无需 Go 或 Docker
-- **JSONL 流式输出** — 实时接收 Agent 响应
+- **多路复用** — 一个实例同时对接多个 IM 与多个 Agent
+- **自定义 Agent 接入** — 通过 [ACP 协议](https://agentcommunicationprotocol.dev) 接入任何 HTTP 端点；支持 `/.well-known/acp` 自动发现
+- **内置 IM 通道** — 微信（iLink）、飞书（WebSocket 长连接）、Telegram（grammy）、**Discord**（discord.js）
+- **内置 Agent** — Claude Code、Codex、Copilot、OpenCode（统一 `AgentBase` 适配）
+- **插件架构** — 轻松扩展新 IM / Agent
+- **原生 TypeScript** — 无需 Go / Docker / Redis
+- **JSONL 流式输出** — 真实流式 + 多字节 UTF-8 安全
 
 ## 安装
 
@@ -65,106 +80,173 @@ im-hub start           # 启动后访问 http://localhost:3000
 npm install -g im-hub
 ```
 
+需要 **Node.js ≥ 18**（生产推荐 ≥ 22 LTS，详见 [`docs/deployment.md`](docs/deployment.md)）。
+
 ## 快速开始
 
 ```bash
-# 1. 配置微信
-im-hub config wechat
-# 扫描二维码登录
+# 1. 配置至少一个 IM
+im-hub config wechat        # 扫码登录
+im-hub config feishu        # 飞书 App ID + Secret，无需 webhook
+im-hub config telegram      # @BotFather 拿 Token
+im-hub config discord       # Bot Token，详见 docs/discord-setup.md
 
-# 或配置飞书（WebSocket 长连接，无需 webhook！）
-im-hub config feishu
-# 输入飞书开放平台的 App ID 和 App Secret
-
-# 或配置 Telegram
-im-hub config telegram
-# 从 @BotFather 获取 Bot Token
-
-# 2. 配置 Claude Code（可选，自动检测）
+# 2. （可选）配置 Agent CLI，多数能自动检测
 im-hub config claude
 
-# 3. 启动桥接
+# 3. （可选）通过 ACP 接入远端自定义 Agent
+im-hub config agent
+
+# 4. 启动
 im-hub start
 ```
 
-### 飞书配置（WebSocket 长连接）
+### 飞书（WebSocket 长连接）
 
-飞书使用 WebSocket 长连接模式，这意味着：
-- 无需配置 webhook
-- 无需公网 IP 或域名
-- 无需 ngrok 等内网穿透工具
-- 直接从本地运行
+- ✅ 无需 webhook
+- ✅ 无需公网 IP / 域名
+- ✅ 无需 ngrok 内网穿透
+- ✅ 直接从本地启动
 
-配置好 App ID 和 App Secret 后启动即可，Bot 会自动通过 WebSocket 连接到飞书服务器。
+### Discord
+
+完整流程（创建 Bot、Intents、OAuth 邀请）见 [`docs/discord-setup.md`](docs/discord-setup.md)。
 
 ### 接入你自己的 Agent
 
-im-hub 支持 **ACP（Agent Communication Protocol）**，只需你的 Agent 暴露标准 HTTP 端点，就能接入——不管是业务机器人、内部工具还是云服务，都可以。
+im-hub 支持 **ACP（Agent Communication Protocol）**，只要你的 Agent 暴露一个标准 HTTP 端点就能接入——业务机器人、内部工具、云服务，皆可。
 
 ```bash
 im-hub config agent
-# 交互式配置：名称、端点 URL、认证方式（无 / Bearer / API Key）
-# 自动验证连接
+# 交互式：名称、端点、认证（无 / Bearer / API Key），自动验证连接 + /.well-known/acp 自动发现
 ```
 
-配置完成后，和内置 Agent 一样使用：
+接入后用法和内置 Agent 一致：
 
 ```
-/myagent 分析一下一季度的销售报告    # 切换到你的自定义 Agent
+/myagent 分析一下一季度的销售报告
 ```
 
-## 命令
+### 把 im-hub 当作 Agent 用
+
+im-hub 同时暴露 ACP 服务端，任何 ACP 客户端都可以以 `POST http://localhost:3000/tasks`（同步）或加 `?mode=stream`（SSE）调用，鉴权同 Web Token：`Authorization: Bearer <token>`。
+
+## CLI 命令
 
 ```
-im-hub                 # 等同于 start
-im-hub start           # 启动桥接
+im-hub                 # 等同 start
+im-hub start           # 启动桥接 + Web UI
 im-hub config wechat   # 配置微信
 im-hub config feishu   # 配置飞书
 im-hub config telegram # 配置 Telegram
+im-hub config discord  # 配置 Discord
 im-hub config claude   # 配置 Claude Code
 im-hub config agent    # 接入自定义 ACP Agent
-im-hub agents          # 列出可用的 Agent
-im-hub messengers      # 列出可用的 IM 通道
+im-hub agents          # 列出可用 Agent
+im-hub messengers      # 列出可用 IM
 im-hub help
 ```
 
 ## 聊天命令
 
-在 IM 中直接发送：
+直接在 IM 里发，回包流式回到同一 thread。
+
+| 命令 | 含义 |
+|---|---|
+| 任意文本 | 路由到 Agent（Sticky 会话 + 意图分类） |
+| `/<agent> <内容>` | 切换 Agent 并发送（如 `/cc 解释这段代码`、`/oc`、`/cx`、`/co`） |
+| `/help` | 帮助 |
+| `/agents` | 列出可用 Agent |
+| `/status` | 连接状态 |
+| `/new` | 开新会话（清空历史） |
+| `/router status\|policy\|explain\|reset` | 查看路由策略 / 预测某条消息会去哪 |
+| `/audit [n]` | 最近的调用审计 |
+| `/job ...` | 查看 / 取消持久化任务 |
+| `/schedule ...` | 列出 / 添加 / 删除 cron 调度 |
+| `/sessions` | 列出本 thread 最近的会话 |
+| `/model [provider/model]` | 查看或切换会话模型 |
+| `/models` | 列出当前 Agent 可用模型 |
+| `/think on\|off\|...` | 切换"深度思考"模式 |
+| `/stats` | Agent 调用 / 延迟 / 错误统计 |
+| `y` / `n` / `批准` / `拒绝` | 同意 / 拒绝 Claude 工具调用（HITL） |
+
+## 工具调用人审（Human-in-the-loop）
+
+当你从 IM 启动的 Claude 任务尝试调用工具时，im-hub 会暂停它，并在同一 IM 会话发送审批卡片：
 
 ```
-hello                  # 发送给默认 Agent（保留上下文）
-/status                # 查看连接状态
-/help                  # 查看可用命令
-/agents                # 列出可用的 Agent
-/new                   # 开始新对话（清除上下文）
-/cc 解释这段代码        # 切换到 Claude Code
-/cx 解释这段代码        # 切换到 Codex
-/co 解释这段代码        # 切换到 Copilot
-/oc 解释这段代码        # 切换到 OpenCode
+🔐 工具调用审批请求
+工具：Bash
+入参：{"command":"rm -rf node_modules"}
+回复 y 批准 / n 拒绝（5 分钟内未操作将自动拒绝）
+req: a3f1c0d2
 ```
+
+回复 `y` / `n` / `批准` / `拒绝`，决策通过 MCP sidecar 回到 Claude，对应继续或中止执行。同一审批链路在微信 / Telegram / 飞书 / Discord 上零差异工作。可用 `IMHUB_APPROVAL_DISABLED=1` 关闭。
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        im-hub core                         │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ Plugin      │  │ Message     │  │ Session Manager     │  │
-│  │ Registry    │  │ Router      │  │ (per conversation)  │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-         │                        │
-         ▼                        ▼
-┌─────────────────┐      ┌─────────────────────┐
-│ Messenger Plugins│      │  Agent Plugins      │
-│ • wechat         │      │ • claude-code        │
-│ • feishu ✓        │      │ • codex              │
-│ • telegram ✓      │      │ • copilot            │
-│                  │      │ • opencode           │
-│                  │      │ • your-agent (ACP) ✨ │
-└─────────────────┘      └─────────────────────┘
+                       ┌─── 外部触发 ────┐
+                       │ cron 30s tick    │
+                       │ webhook → /api/notify
+                       │ REST   → /api/invoke
+                       │ ACP    → /tasks (sync/SSE)
+                       └────────────┬─────┘
+┌─ IM 入口 ────────────────────────┼─────────────────────┐
+│ 微信 iLink     （长轮询 + 心跳）                       │
+│ Telegram       （grammy）                              │
+│ 飞书           （Lark SDK WebSocket）                  │
+│ Discord        （discord.js Gateway）                  │
+│ Web Chat       （浏览器 WebSocket）                    │
+└────────────────────────────────┬──────────────────────┘
+                                 │ MessageContext
+                                 ▼
+            ┌── 路由前置 gates ─────────────────┐
+            │ workspace.resolve(userId)          │
+            │ rateLimiter.allow(userKey)         │
+            │ traceId + pino 子 logger           │
+            └────────────────┬───────────────────┘
+                             ▼
+            ┌── parseMessage + 意图分类 ───────┐
+            │ /<cmd>     → 内置子命令            │
+            │ /<agent>   → 显式切换              │
+            │ default    → classifyIntent       │
+            │   ├ 主题正则（中英）               │
+            │   ├ 关键词画像                    │
+            │   ├ Sticky 会话偏置                │
+            │   └ LLM 兜底（按需）               │
+            └────────────────┬───────────────────┘
+                             ▼
+            ┌── Agent 调用 ─────────────────────┐
+            │ workspace 白名单 + 断路器          │
+            │ + 可用性 TTL 缓存                 │
+            │ AgentBase.sendPrompt → spawnStream│
+            │  (LineBuffer · 真流式 ·           │
+            │   abort/timeout · UTF-8 安全)      │
+            └────────────────┬───────────────────┘
+              ┌──────┬───────┼────────┬─────────┐
+              ▼      ▼       ▼        ▼         ▼
+          opencode claude  codex   copilot   ACP 远端
+                     │
+                     ▼ （工具需要审批时）
+              MCP sidecar ─ unix socket ─ approvalBus
+                                            └─ approvalRouter → IM 会话
+
+┌─ Cross-cutting ───────────────────────────────────────┐
+│ audit-log    (SQLite，30 天保留)                       │
+│ job-board    (SQLite 持久化 + AbortController)        │
+│ scheduler    (30s tick → cron → 入队)                  │
+│ workspaces   (按租户隔离 Agent 白名单 / 限流)          │
+│ metrics      (Prometheus 文本，/api/metrics)           │
+│ session      (~/.im-hub/sessions/，append-only JSONL) │
+│ pino         (traceId 全链路，生产 JSON)               │
+└───────────────────────────────────────────────────────┘
 ```
+
+单进程、单实例：SQLite 三件套（`audit.db` / `jobs.db` / `schedules.db`）+ 会话文件树就是全部持久化层，不依赖 Redis / MQ。
+
+更深入的架构剖析见 [`docs/architecture/current.md`](docs/architecture/current.md)。
 
 ## 项目结构
 
@@ -175,22 +257,51 @@ im-hub/
 │   │   ├── types.ts              # 插件接口
 │   │   ├── registry.ts           # 插件注册
 │   │   ├── router.ts             # 消息路由
-│   │   └── session.ts            # 会话管理
+│   │   ├── session.ts            # 会话管理（append-only JSONL）
+│   │   ├── workspace.ts          # 多租户工作区
+│   │   ├── intent.ts             # 意图分类
+│   │   ├── intent-llm.ts         # LLM 兜底（LRU 缓存）
+│   │   ├── circuit-breaker.ts    # 单 Agent 断路器
+│   │   ├── rate-limiter.ts       # Token bucket 限流
+│   │   ├── job-board.ts          # 持久化任务 + 取消
+│   │   ├── schedule.ts           # cron tick → 入队
+│   │   ├── audit-log.ts          # SQLite 审计
+│   │   ├── metrics.ts            # Prometheus 分位
+│   │   ├── acp-server.ts         # /tasks ACP 服务端
+│   │   ├── approval-bus.ts       # 工具审批 pub/sub
+│   │   ├── approval-router.ts    # 审批 ↔ IM 桥
+│   │   ├── bgjob-reader.ts       # ~/.claude + ~/.config/opencode bgjobs
+│   │   ├── agent-base.ts         # CLI Agent 共享 spawn/stream
+│   │   ├── config-schema.ts      # zod schema
+│   │   ├── logger.ts             # pino + traceId
+│   │   ├── sqlite-helper.ts      # 共享 prepare / PRAGMA 缓存
+│   │   └── commands/             # /audit /router /job /schedule /model …
 │   ├── plugins/
 │   │   ├── messengers/
-│   │   │   └── wechat/           # 微信适配器
+│   │   │   ├── wechat/           # iLink 长轮询
+│   │   │   ├── feishu/           # Lark SDK WebSocket
+│   │   │   ├── telegram/         # grammy
+│   │   │   └── discord/          # discord.js
 │   │   └── agents/
-│   │       ├── claude-code/      # Claude Code 适配器
-│   │       ├── codex/            # Codex 适配器
-│   │       ├── copilot/          # Copilot 适配器
-│   │       └── opencode/         # OpenCode 适配器
-│   ├── index.ts                  # 主入口
-│   ├── cli.ts                    # CLI 命令
+│   │       ├── claude-code/      # 含 MCP 审批 sidecar
+│   │       ├── codex/
+│   │       ├── copilot/
+│   │       ├── opencode/
+│   │       └── acp/              # ACP 客户端 + /.well-known 发现
+│   ├── index.ts
+│   ├── cli.ts
 │   └── web/
-│       ├── server.ts             # Web 对话 HTTP + WebSocket 服务
+│       ├── server.ts             # HTTP + WS + REST + ACP server
 │       └── public/
-│           ├── index.html         # 对话界面（双语）
-│           └── settings.html      # 设置界面（双语）
+│           ├── index.html         # 对话界面
+│           ├── tasks.html         # 任务仪表盘
+│           └── settings.html      # 设置界面
+├── docs/
+│   ├── architecture/{current,target}.md
+│   ├── adr/{0001,0002,0003}-*.md
+│   ├── deployment.md
+│   ├── discord-setup.md
+│   └── upgrade-plan.md
 ├── package.json
 ├── tsconfig.json
 └── README.md
@@ -202,9 +313,14 @@ im-hub/
 
 ```json
 {
-  "messengers": ["wechat"],
-  "agents": ["claude-code"],
+  "messengers": ["wechat", "discord"],
+  "agents": ["claude-code", "opencode"],
   "defaultAgent": "claude-code",
+  "discord": {
+    "botToken": "***",
+    "allowedGuilds": [],
+    "allowedChannels": []
+  },
   "acpAgents": [
     {
       "name": "my-agent",
@@ -213,59 +329,87 @@ im-hub/
       "auth": { "type": "bearer", "token": "***" },
       "enabled": true
     }
+  ],
+  "workspaces": [
+    {
+      "id": "team-data",
+      "name": "数据团队",
+      "agents": ["opencode", "my-agent"],
+      "members": ["user-123"],
+      "rateLimit": { "rate": 30, "intervalSec": 60, "burst": 60 }
+    }
   ]
 }
 ```
 
+由 `zod` 在启动时与每次 PUT `/api/config` 时校验，配置错误会立即报错而不是带病运行。
+
 ## 环境要求
 
-- **Node.js 18+**
-- **Claude Code CLI** — `npm install -g @anthropic-ai/claude-code`
+- **Node.js 18+**（生产建议 22 LTS+）
+- **至少一个 Agent CLI**（或 ACP 远端）：
+  - `npm i -g @anthropic-ai/claude-code`
+  - `npm i -g @openai/codex`
+  - `npm i -g @github/copilot`
+  - `npm i -g opencode-ai`
 
 ## 开发
 
 ```bash
-# 克隆
 git clone https://github.com/ceociocto/im-hub
 cd im-hub
-
-# 安装依赖
 npm install
-
-# 构建
-npm run build
-
-# 开发模式（监听文件变化）
-npm run dev
-
-# 运行
+npm run build      # tsc + 拷贝 public/
+npm run dev        # tsc --watch
+npm test           # bun test
+npm run typecheck  # tsc --noEmit（src + 测试）
 npm start
 ```
 
 ## 路线图
 
-### v0.1.x (MVP)
-- [x] 微信适配器（扫码登录）
-- [x] Claude Code Agent 集成
-- [x] Codex Agent
-- [x] Copilot Agent
-- [x] OpenCode Agent
+### v0.1.x（MVP）
+- [x] 微信扫码登录
+- [x] Claude Code、Codex、Copilot、OpenCode Agent
 - [x] 基础命令路由
 
-### v0.2.0
+### v0.2.0 — 多 IM
 - [x] 飞书适配器
 - [x] Telegram 适配器
 - [x] 会话持久化与对话历史
 - [x] ACP 自定义 Agent 接入
 
-### v0.2.x
-- [x] Web 对话界面 —— 浏览器端 Agent 对话，支持流式响应
-- [x] 设置页面 —— 在浏览器中配置 Agent、消息通道和 ACP
-- [x] 双语界面 —— 中英文自动检测浏览器语言
+### v0.2.x — Web & UI
+- [x] Web 对话界面（流式）
+- [x] 设置页面
+- [x] 双语界面（EN / 中文）
+
+### v0.2.13 — 基础设施
+- [x] 结构化日志（pino）+ traceId
+- [x] zod 配置 schema 校验
+- [x] AgentBase 抽象 + 可用性缓存
+- [x] 审计日志（SQLite）+ `/audit`
+- [x] 意图分类 + 断路器 + 限流
+- [x] ACP server 模式（`POST /tasks`，sync + SSE）
+- [x] `/.well-known/acp` 自动发现
+- [x] 多租户 Workspace + Agent 白名单
+- [x] 持久化 Job Board + cron 调度
+- [x] Web `/tasks` 面板 + REST API
+- [x] Prometheus 指标
+
+### v0.2.14 — 工具审批
+- [x] IM 端的工具调用人审（HITL）
+- [x] MCP 审批 sidecar（claude-code adapter）
+
+### v0.2.15 — Discord & 仪表盘
+- [x] Discord IM 适配器
+- [x] 任务面板接入 Claude / opencode bgjobs
+- [x] Subtask 平铺列表
 
 ### v0.3.0
 - [ ] 钉钉适配器
 - [ ] Slack 适配器
+- [ ] 飞书 / Discord 卡片按钮版审批（替代纯文本）
 
 ## 社区 <a name="wechat-group"></a>
 

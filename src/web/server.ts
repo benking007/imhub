@@ -892,6 +892,11 @@ function serveIndexHtml(res: ServerResponse, filePath: string, token: string): v
   }
   let html = readFileSync(filePath, 'utf-8')
   html = html.replace('</head>', `<script>window.IMHUB_TOKEN='${token}';</script></head>`)
-  res.writeHead(200, { 'Content-Type': 'text/html' })
+  // No-cache so dashboard updates land for users without forcing a hard refresh.
+  // The HTML is small (<30KB) and the round-trip is cheap; correctness wins.
+  res.writeHead(200, {
+    'Content-Type': 'text/html',
+    'Cache-Control': 'no-cache, must-revalidate',
+  })
   res.end(html)
 }
