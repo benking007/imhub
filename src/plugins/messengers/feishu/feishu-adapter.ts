@@ -113,26 +113,22 @@ export class FeishuAdapter implements MessengerAdapter {
     await this.client.sendCard(threadId, card)
   }
 
-  async sendThinking(
-    threadId: string,
-    text: string,
-  ): Promise<(() => Promise<void>) | undefined> {
+  /**
+   * Send a "🤔 思考中…" placeholder so the user sees immediate feedback
+   * (sendTyping is a no-op on Feishu — the SDK doesn't expose a public
+   * typing API). The placeholder is intentionally not recalled when the
+   * real reply arrives — keeping it in chat history shows the user when
+   * the bot started working, and matches WeChat behaviour where recall
+   * isn't available either.
+   */
+  async sendThinking(threadId: string, text: string): Promise<undefined> {
     if (!this.client) return undefined
     try {
-      const resp = await this.client.sendMessage(threadId, text)
-      const messageId = resp.message_id
-      if (!messageId) return undefined
-      return async () => {
-        try {
-          await this.client!.deleteMessage(messageId)
-        } catch (err) {
-          log.debug({ err: String(err), messageId }, 'Failed to recall thinking placeholder')
-        }
-      }
+      await this.client.sendMessage(threadId, text)
     } catch (err) {
       log.debug({ err: String(err) }, 'Failed to send thinking placeholder')
-      return undefined
     }
+    return undefined
   }
 
   async sendTyping(threadId: string, isTyping: boolean): Promise<void> {

@@ -294,13 +294,14 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     return
   }
 
-  // Determine active agent for prefix
-  const existingSession = await sessionManager.getExistingSession(platform, ctx.channelId, message.threadId)
-  const activeAgent = existingSession?.agent || defaultAgent
-
-  const maybePrefix = (text: string): string => {
-    if (activeAgent && activeAgent !== defaultAgent) {
-      return `[${activeAgent}]\n\n${text}`
+  // Prefix uses the session's agent at reply time (re-read after routing so
+  // a /agent-style switch in this turn is reflected). Lazy so we only hit
+  // the session store when we have a result to send.
+  const maybePrefix = async (text: string): Promise<string> => {
+    const s = await sessionManager.getExistingSession(platform, ctx.channelId, message.threadId)
+    const replyAgent = s?.agent || defaultAgent
+    if (replyAgent && replyAgent !== defaultAgent) {
+      return `[${replyAgent}]\n\n${text}`
     }
     return text
   }
@@ -371,19 +372,7 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     if (typeof result === 'string') {
       await stopTyping()
       await dismiss()
-
-      // For Feishu, use cards for better formatting
-      if (platform === 'feishu' && messenger.sendCard) {
-        const { CardBuilder } = await import('./plugins/messengers/feishu/card-builder.js')
-        const card = new CardBuilder()
-          .addMarkdown(result)
-          .addAgentBadge(ctx.session?.agent || defaultAgent)
-          .build()
-        await messenger.sendCard(message.threadId, card)
-      } else {
-        await messenger.sendMessage(message.threadId, maybePrefix(result))
-      }
-
+      await messenger.sendMessage(message.threadId, await maybePrefix(result))
       logger.info({ event: 'message.sent', responseLen: result.length })
     } else {
       // Stream response chunks
@@ -396,18 +385,7 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
       await dismiss()
 
       if (fullResponse) {
-        // For Feishu, use cards for better formatting
-        if (platform === 'feishu' && messenger.sendCard) {
-          const { CardBuilder } = await import('./plugins/messengers/feishu/card-builder.js')
-          const card = new CardBuilder()
-            .addMarkdown(fullResponse)
-            .addAgentBadge(ctx.session?.agent || defaultAgent)
-            .build()
-          await messenger.sendCard(message.threadId, card)
-        } else {
-          await messenger.sendMessage(message.threadId, maybePrefix(fullResponse))
-        }
-
+        await messenger.sendMessage(message.threadId, await maybePrefix(fullResponse))
         logger.info({ event: 'message.sent', responseLen: fullResponse.length })
       } else {
         logger.warn({ event: 'message.empty_response' })
