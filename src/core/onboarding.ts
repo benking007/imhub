@@ -44,6 +44,7 @@ export interface Config {
   defaultAgent: string
   telegram?: { botToken: string; channelId?: string }
   feishu?: { appId: string; appSecret: string; channelId?: string }
+  discord?: { botToken: string; channelId?: string; allowedGuilds?: string[]; allowedChannels?: string[] }
   acpAgents?: Array<{
     name: string
     aliases?: string[]
@@ -62,6 +63,7 @@ const AVAILABLE_MESSENGERS: MessengerInfo[] = [
   { id: 'wechat-ilink', displayName: 'WeChat', description: 'Scan QR to login' },
   { id: 'telegram', displayName: 'Telegram', description: 'Bot token from @BotFather' },
   { id: 'feishu', displayName: 'Feishu/Lark', description: 'App ID and Secret' },
+  { id: 'discord', displayName: 'Discord', description: 'Bot token from Developer Portal' },
 ]
 
 const AGENT_PACKAGES: Record<string, AgentInstallHint> = {
@@ -301,7 +303,7 @@ export async function runMessengerOnboarding(config: Config): Promise<Config | n
       })
       console.log(`  Q. Quit and configure manually\n`)
 
-      const choice = await prompt(rl, 'Select a messenger (1-3 or Q): ')
+      const choice = await prompt(rl, `Select a messenger (1-${AVAILABLE_MESSENGERS.length} or Q): `)
 
       // Handle quit
       if (choice.toLowerCase() === 'q' || choice === '') {
@@ -312,7 +314,7 @@ export async function runMessengerOnboarding(config: Config): Promise<Config | n
 
       const index = parseInt(choice, 10) - 1
       if (index < 0 || index >= AVAILABLE_MESSENGERS.length) {
-        console.log('Invalid choice. Please enter 1-3 or Q.')
+        console.log(`Invalid choice. Please enter 1-${AVAILABLE_MESSENGERS.length} or Q.`)
         continue
       }
 
@@ -362,6 +364,8 @@ async function configureMessenger(
       return configureTelegram(config, rl)
     case 'feishu':
       return configureFeishu(config, rl)
+    case 'discord':
+      return configureDiscord(config, rl)
     default:
       console.log(`Unknown messenger: ${messengerId}`)
       return null
@@ -458,6 +462,52 @@ async function configureFeishu(config: Config, rl: ReturnType<typeof createInter
   console.log('✅ Feishu bot credentials saved')
   console.log('\n✅ Using WebSocket long polling mode - no webhook configuration needed!')
   console.log('   The bot will automatically connect to Feishu servers.')
+
+  return config
+}
+
+async function configureDiscord(config: Config, rl: ReturnType<typeof createInterface>): Promise<Config | null> {
+  console.log('\n📱 Configuring Discord...')
+  console.log('To create a Discord bot:')
+  console.log('1. Go to https://discord.com/developers/applications')
+  console.log('2. Click "New Application" and give it a name')
+  console.log('3. Go to "Bot" tab and click "Add Bot"')
+  console.log('4. IMPORTANT: Enable "MESSAGE CONTENT INTENT" under Privileged Gateway Intents')
+  console.log('5. Click "Reset Token" to get your bot token')
+  console.log('6. Go to OAuth2 > URL Generator:')
+  console.log('   - Scopes: bot')
+  console.log('   - Bot Permissions: Send Messages, Read Message History, View Channels')
+  console.log('7. Use the generated URL to invite the bot to your server\n')
+
+  const token = await prompt(rl, 'Enter your bot token: ')
+
+  if (!token) {
+    console.log('❌ Bot token is required')
+    return null
+  }
+
+  const channelId = await prompt(rl, 'Enter channel ID (optional, press Enter for default): ')
+  const allowedGuilds = await prompt(rl, 'Allowed guild IDs (comma-separated, optional): ')
+  const allowedChannels = await prompt(rl, 'Allowed channel IDs (comma-separated, optional): ')
+
+  config.discord = {
+    botToken: token,
+    channelId: channelId || 'default',
+    allowedGuilds: allowedGuilds ? allowedGuilds.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+    allowedChannels: allowedChannels ? allowedChannels.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+  }
+  if (!config.messengers.includes('discord')) {
+    config.messengers.push('discord')
+  }
+
+  console.log('✅ Discord bot token saved')
+  console.log(`   Channel ID: ${config.discord.channelId}`)
+  if (config.discord.allowedGuilds?.length) {
+    console.log(`   Allowed guilds: ${config.discord.allowedGuilds.join(', ')}`)
+  }
+  if (config.discord.allowedChannels?.length) {
+    console.log(`   Allowed channels: ${config.discord.allowedChannels.join(', ')}`)
+  }
 
   return config
 }

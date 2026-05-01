@@ -24,12 +24,20 @@ const feishuSchema = z.object({
   channelId: z.string().optional(),
 })
 
+const discordSchema = z.object({
+  botToken: z.string().min(1),
+  channelId: z.string().optional(),
+  allowedGuilds: z.array(z.string()).optional(),
+  allowedChannels: z.array(z.string()).optional(),
+})
+
 export const configSchema = z.object({
   messengers: z.array(z.string()).default([]),
   agents: z.array(z.string()).default([]),
   defaultAgent: z.string().default('claude-code'),
   telegram: telegramSchema.optional(),
   feishu: feishuSchema.optional(),
+  discord: discordSchema.optional(),
   acpAgents: z.array(acpAgentSchema).optional(),
   /** Base URLs to probe for `.well-known/acp` at startup. */
   acpDiscoveryUrls: z.array(z.string().url()).optional(),

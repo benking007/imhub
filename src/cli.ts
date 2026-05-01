@@ -402,6 +402,7 @@ program
       console.log('  wechat   - WeChat adapter')
       console.log('  telegram - Telegram adapter')
       console.log('  feishu   - Feishu/Lark adapter')
+      console.log('  discord  - Discord adapter')
       console.log('\nAgents:')
       console.log('  claude   - Claude Code agent')
       console.log('  codex    - OpenAI Codex CLI agent')
@@ -596,6 +597,74 @@ program
         console.log('✅ Feishu bot credentials saved')
         console.log(`\n✅ Using WebSocket long polling mode - no webhook configuration needed!`)
         console.log(`   The bot will automatically connect to Feishu servers.`)
+        break
+
+      case 'discord':
+        console.log('📱 Configuring Discord adapter...')
+        console.log('To create a Discord bot:')
+        console.log('1. Go to https://discord.com/developers/applications')
+        console.log('2. Click "New Application" and give it a name')
+        console.log('3. Go to "Bot" tab and click "Add Bot"')
+        console.log('4. IMPORTANT: Enable "MESSAGE CONTENT INTENT" under Privileged Gateway Intents')
+        console.log('5. Click "Reset Token" to get your bot token')
+        console.log('6. Use OAuth2 URL Generator to invite the bot to your server\n')
+
+        const { createInterface: createDiscordRl } = await import('readline')
+        const discordRl = createDiscordRl({
+          input: process.stdin,
+          output: process.stdout,
+        })
+
+        const discordToken = await new Promise<string>((resolve) => {
+          discordRl.question('Enter your bot token: ', (answer) => {
+            resolve(answer.trim())
+          })
+        })
+
+        if (!discordToken) {
+          console.log('❌ Bot token is required')
+          discordRl.close()
+          return
+        }
+
+        const discordChannelId = await new Promise<string>((resolve) => {
+          discordRl.question('Enter channel ID (optional, press Enter for default): ', (answer) => {
+            resolve(answer.trim() || 'default')
+          })
+        })
+
+        const allowedGuilds = await new Promise<string>((resolve) => {
+          discordRl.question('Allowed guild IDs (comma-separated, optional): ', (answer) => {
+            resolve(answer.trim())
+          })
+        })
+
+        const allowedChannels = await new Promise<string>((resolve) => {
+          discordRl.question('Allowed channel IDs (comma-separated, optional): ', (answer) => {
+            resolve(answer.trim())
+          })
+        })
+
+        discordRl.close()
+
+        config.discord = {
+          botToken: discordToken,
+          channelId: discordChannelId,
+          allowedGuilds: allowedGuilds ? allowedGuilds.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+          allowedChannels: allowedChannels ? allowedChannels.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+        }
+        if (!config.messengers.includes('discord')) {
+          config.messengers.push('discord')
+        }
+
+        console.log('✅ Discord bot token saved')
+        console.log(`   Channel ID: ${discordChannelId}`)
+        if (config.discord.allowedGuilds?.length) {
+          console.log(`   Allowed guilds: ${config.discord.allowedGuilds.join(', ')}`)
+        }
+        if (config.discord.allowedChannels?.length) {
+          console.log(`   Allowed channels: ${config.discord.allowedChannels.join(', ')}`)
+        }
         break
 
       case 'opencode':

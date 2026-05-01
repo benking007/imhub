@@ -126,6 +126,9 @@ class PluginRegistry {
     const { feishuAdapter } = await import('../plugins/messengers/feishu/index.js')
     this.registerMessenger(feishuAdapter)
 
+    const { discordAdapter } = await import('../plugins/messengers/discord/index.js')
+    this.registerMessenger(discordAdapter)
+
     // Load built-in agents
     const { claudeCodeAdapter } = await import('../plugins/agents/claude-code/index.js')
     this.registerAgent(claudeCodeAdapter)
