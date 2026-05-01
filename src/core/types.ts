@@ -160,6 +160,12 @@ export interface AgentSendOpts {
   platform?: string
   userId?: string
   channelId?: string
+  /** Optional UUID to bind to the agent's own resumable-session concept.
+   *  Currently honoured by the claude-code adapter (passed as
+   *  `--session-id`) so the user can later run `claude --resume <uuid>`
+   *  to continue or inspect the run from their terminal. Other adapters
+   *  ignore this. */
+  agentSessionId?: string
 }
 
 /**

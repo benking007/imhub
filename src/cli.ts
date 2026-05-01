@@ -5,6 +5,7 @@ import { program } from 'commander'
 import { homedir } from 'os'
 import { join } from 'path'
 import { readFile, writeFile, mkdir } from 'fs/promises'
+import { randomUUID } from 'crypto'
 import { registry } from './core/registry.js'
 import { sessionManager } from './core/session.js'
 import { parseMessage, routeMessage, type RouteContext } from './core/router.js'
@@ -351,13 +352,35 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     const willInvokeAgent =
       (parsed.type === 'default' || parsed.type === 'agent' || parsed.type === 'agentCommand') &&
       !looksLikeApproval
+
+    // Resolve which agent will actually run, so we know whether to allocate
+    // a resumable claude-code session id. For an explicit /agent switch we
+    // can read parsed.agent directly; otherwise the active agent comes from
+    // the existing sticky session (or default agent if none yet).
+    let agentForRun: string | undefined
+    if (willInvokeAgent) {
+      if (parsed.type === 'agent') {
+        agentForRun = parsed.agent
+      } else {
+        const stickySession = await sessionManager.getExistingSession(
+          platform, ctx.channelId, message.threadId,
+        )
+        agentForRun = stickySession?.agent || defaultAgent
+      }
+      if (agentForRun === 'claude-code') {
+        // UUID with format claude requires; user will see this in the
+        // placeholder and can later run `claude --resume <uuid>` to inspect
+        // or continue the run from their terminal.
+        routeCtx.agentSessionId = randomUUID()
+      }
+    }
+
     if (willInvokeAgent && messenger.sendThinking) {
-      // Include the traceId so the user can grep logs for this exact run.
-      // Format intentional: 思考中 on line 1, (traceId) on line 2.
+      const idForUser = routeCtx.agentSessionId || traceId
       try {
         dismissThinking = await messenger.sendThinking(
           message.threadId,
-          `🤔 思考中…\n(${traceId})`,
+          `🤔 思考中…\n(${idForUser})`,
         )
       } catch (err) {
         logger.debug({ err: String(err) }, 'sendThinking failed')

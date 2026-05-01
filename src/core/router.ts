@@ -36,6 +36,11 @@ export interface RouteContext {
   /** Set by the routing layer when intent classification picks the agent.
    * Audit log records this so we can answer "why was this agent chosen?". */
   intent?: string
+  /** Pre-allocated UUID forwarded to adapters that support a resumable
+   * session (currently claude-code's --session-id). Set by cli when an
+   * IM message is about to invoke a claude-code run, so the placeholder
+   * can show the same id the user will later use with `claude --resume`. */
+  agentSessionId?: string
 }
 
 /** Built-in coding agent commands forwarded to the active agent */
@@ -361,6 +366,7 @@ export async function callAgentWithHistory(
     platform: ctx.platform,
     userId: ctx.userId,
     channelId: ctx.channelId,
+    agentSessionId: ctx.agentSessionId,
   })
 
   return (async function* (): AsyncGenerator<string> {

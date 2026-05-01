@@ -57,8 +57,9 @@ export class ClaudeCodeAdapter extends AgentBase {
    * Legacy/fallback args — used when approval routing is disabled or not
    * applicable (no IM context, bus down, IMHUB_APPROVAL_DISABLED=1).
    */
-  protected buildArgs(prompt: string, _opts: AgentSendOpts): string[] {
+  protected buildArgs(prompt: string, opts: AgentSendOpts): string[] {
     return [
+      ...(opts.agentSessionId ? ['--session-id', opts.agentSessionId] : []),
       ...BASE_ARGS,
       '--permission-mode', 'dontAsk',
       prompt,
@@ -124,6 +125,7 @@ export class ClaudeCodeAdapter extends AgentBase {
     // their own copy, so cleanup never deletes another spawn's tmpdir.
     return {
       args: [
+        ...(opts.agentSessionId ? ['--session-id', opts.agentSessionId] : []),
         // ORDER MATTERS: --mcp-config takes <configs...> (variadic). Place it
         // before another `-X` flag so it sees exactly one file path, not the
         // prompt as a second config file.
