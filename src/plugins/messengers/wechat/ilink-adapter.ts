@@ -104,6 +104,21 @@ export class ILinkWeChatAdapter implements MessengerAdapter {
   // Typing Indicator
   // ============================================
 
+  /**
+   * Send a "thinking" placeholder. iLink doesn't expose a server-side message
+   * recall API, so the placeholder lingers in the chat after the real
+   * response arrives — but at least the user gets immediate feedback that
+   * the bot received their message and is working on it.
+   */
+  async sendThinking(threadId: string, text: string): Promise<undefined> {
+    try {
+      await this.sendMessage(threadId, text)
+    } catch (err) {
+      log.debug({ err: String(err) }, 'Failed to send thinking placeholder')
+    }
+    return undefined  // no dismiss — recall not supported on iLink
+  }
+
   async sendTyping(threadId: string, isTyping: boolean): Promise<void> {
     if (!this.client.hasCredentials()) {
       return

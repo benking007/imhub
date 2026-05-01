@@ -70,7 +70,7 @@ export class FeishuClient {
   // API Calls
   // ============================================
 
-  async sendMessage(chatId: string, text: string): Promise<unknown> {
+  async sendMessage(chatId: string, text: string): Promise<{ message_id?: string }> {
     const response = await this.client.im.message.create({
       params: {
         receive_id_type: 'chat_id',
@@ -81,7 +81,13 @@ export class FeishuClient {
         content: JSON.stringify({ text }),
       },
     })
-    return response.data
+    return (response.data ?? {}) as { message_id?: string }
+  }
+
+  async deleteMessage(messageId: string): Promise<void> {
+    await this.client.im.message.delete({
+      path: { message_id: messageId },
+    })
   }
 
   async sendCard(chatId: string, card: unknown): Promise<unknown> {

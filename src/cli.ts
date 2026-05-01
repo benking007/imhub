@@ -326,6 +326,16 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     userId: message.userId,
   }
 
+  // Thinking placeholder — sent if the adapter supports it, dismissed (when
+  // the adapter knows how) just before the real response goes out. Skip for
+  // y/n-style approval replies which already get a same-thread effect from
+  // the resolved approval card; sending "🤔 思考中…" there would just add
+  // noise. We approximate that filter by skipping placeholders for messages
+  // that look like single-token approval words.
+  let dismissThinking: (() => Promise<void>) | undefined
+  const looksLikeApproval = /^\s*[yn]\s*$/i.test(message.text) ||
+    /^\s*(批准|拒绝|同意|不同意|通过|可以|不可以|不行|✅|❌)\s*$/.test(message.text)
+
   try {
     if (messenger.sendTyping) {
       messenger.sendTyping(message.threadId, true).catch(() => {})
@@ -334,11 +344,33 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     const parsed = parseMessage(message.text)
     logger.debug({ event: 'router.parse', parsed: parsed.type })
 
+    // Only show "🤔 思考中…" for messages that will actually go through the
+    // agent — built-in/system commands (/help /status /audit /router etc.)
+    // respond instantly so a placeholder would race the real reply.
+    const willInvokeAgent =
+      (parsed.type === 'default' || parsed.type === 'agent' || parsed.type === 'agentCommand') &&
+      !looksLikeApproval
+    if (willInvokeAgent && messenger.sendThinking) {
+      try {
+        dismissThinking = await messenger.sendThinking(message.threadId, '🤔 思考中…')
+      } catch (err) {
+        logger.debug({ err: String(err) }, 'sendThinking failed')
+      }
+    }
+
     const result = await routeMessage(parsed, routeCtx)
+
+    const dismiss = async () => {
+      if (dismissThinking) {
+        try { await dismissThinking() } catch { /* ignore */ }
+        dismissThinking = undefined
+      }
+    }
 
     // Handle response (string or async generator)
     if (typeof result === 'string') {
       await stopTyping()
+      await dismiss()
 
       // For Feishu, use cards for better formatting
       if (platform === 'feishu' && messenger.sendCard) {
@@ -361,6 +393,7 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
       }
 
       await stopTyping()
+      await dismiss()
 
       if (fullResponse) {
         // For Feishu, use cards for better formatting
@@ -384,6 +417,9 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     const errMsg = error instanceof Error ? error.message : String(error)
     logger.error({ event: 'message.error', error: errMsg })
     await stopTyping()
+    if (dismissThinking) {
+      try { await dismissThinking() } catch { /* ignore */ }
+    }
     try {
       await messenger.sendMessage(message.threadId, '❌ An error occurred processing your message.')
     } catch {

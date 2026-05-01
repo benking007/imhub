@@ -128,7 +128,21 @@ export interface MessengerAdapter {
    * @param card - The card JSON object
    */
   sendCard?(threadId: string, card: unknown): Promise<void>
+  /**
+   * Send a "thinking" placeholder message (e.g. 🤔 思考中…) and return a
+   * dismiss handle. Adapters that can delete or update their own messages
+   * (Feishu) should return a callable that removes the placeholder before
+   * the real response is sent. Adapters that cannot recall (WeChat iLink)
+   * should still send the placeholder and return undefined — the placeholder
+   * lingers in the chat but at least gives the user immediate feedback.
+   * Adapters that prefer their native typing indicator can omit this method.
+   */
+  sendThinking?(threadId: string, text: string): Promise<ThinkingHandle | undefined>
 }
+
+/** Optional callback returned by sendThinking; invoked once the real response
+ *  is ready, to remove or otherwise hide the placeholder. */
+export type ThinkingHandle = () => Promise<void>
 
 /**
  * Optional per-call context piped from the IM router into the agent. Lets

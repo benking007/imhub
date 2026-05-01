@@ -3,7 +3,6 @@
 
 import type { MessengerAdapter, Message, MessageContext } from '../../../core/types.js'
 import { FeishuClient } from './feishu-client.js'
-import { CardBuilder } from './card-builder.js'
 import type { FeishuConfig } from './types.js'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -99,13 +98,12 @@ export class FeishuAdapter implements MessengerAdapter {
     if (!this.client) {
       throw new Error('Feishu adapter not started')
     }
-
-    // Use card for better formatting
-    const card = new CardBuilder()
-      .addMarkdown(text)
-      .build()
-
-    await this.client.sendCard(threadId, card)
+    // Plain text — cards are reserved for cli's explicit sendCard call site
+    // (long markdown agent responses with agent badge). Wrapping every short
+    // message (approval prompts, system replies, errors) as a card was making
+    // every bubble look like a notification, indistinguishable from real
+    // approval-required cards.
+    await this.client.sendMessage(threadId, text)
   }
 
   async sendCard(threadId: string, card: unknown): Promise<void> {
@@ -113,6 +111,28 @@ export class FeishuAdapter implements MessengerAdapter {
       throw new Error('Feishu adapter not started')
     }
     await this.client.sendCard(threadId, card)
+  }
+
+  async sendThinking(
+    threadId: string,
+    text: string,
+  ): Promise<(() => Promise<void>) | undefined> {
+    if (!this.client) return undefined
+    try {
+      const resp = await this.client.sendMessage(threadId, text)
+      const messageId = resp.message_id
+      if (!messageId) return undefined
+      return async () => {
+        try {
+          await this.client!.deleteMessage(messageId)
+        } catch (err) {
+          log.debug({ err: String(err), messageId }, 'Failed to recall thinking placeholder')
+        }
+      }
+    } catch (err) {
+      log.debug({ err: String(err) }, 'Failed to send thinking placeholder')
+      return undefined
+    }
   }
 
   async sendTyping(threadId: string, isTyping: boolean): Promise<void> {
