@@ -36,12 +36,21 @@ interface MessageReceiveEvent {
   }
 }
 
+// Feishu's WebSocket long-poll replays message events on reconnect, so the
+// same message_id can hit handleFeishuMessage multiple times. Dedup with a
+// time-bounded set: messages older than DEDUP_TTL_MS expire automatically,
+// and we cap entries at DEDUP_MAX to bound memory.
+const DEDUP_TTL_MS = 10 * 60 * 1000
+const DEDUP_MAX = 2000
+
 export class FeishuAdapter implements MessengerAdapter {
   readonly name = 'feishu'
   private client: FeishuClient | null = null
   private config: FeishuConfig | null = null
   private messageHandler?: (ctx: MessageContext) => Promise<void>
   private isRunning = false
+  /** message_id → first-seen timestamp (ms). LRU-ish: pruned on insert. */
+  private seenMessages = new Map<string, number>()
 
   async start(): Promise<void> {
     // Load config
@@ -121,6 +130,35 @@ export class FeishuAdapter implements MessengerAdapter {
   // Event Handling
   // ============================================
 
+  /**
+   * Returns true if this message_id was already seen within DEDUP_TTL_MS.
+   * Side effect on first sight: record it and prune any expired entries.
+   */
+  private isDuplicate(messageId: string): boolean {
+    const now = Date.now()
+    const seenAt = this.seenMessages.get(messageId)
+    if (seenAt !== undefined && now - seenAt < DEDUP_TTL_MS) {
+      return true
+    }
+    // First sight (or expired) — record and prune.
+    this.seenMessages.set(messageId, now)
+    if (this.seenMessages.size > DEDUP_MAX) {
+      // Walk in insertion order (Map preserves it) and drop expired or oldest.
+      const cutoff = now - DEDUP_TTL_MS
+      for (const [k, t] of this.seenMessages) {
+        if (t < cutoff) this.seenMessages.delete(k)
+        if (this.seenMessages.size <= DEDUP_MAX * 0.8) break
+      }
+      // If still over (no expirations), drop the oldest until under cap.
+      while (this.seenMessages.size > DEDUP_MAX) {
+        const oldest = this.seenMessages.keys().next().value
+        if (!oldest) break
+        this.seenMessages.delete(oldest)
+      }
+    }
+    return false
+  }
+
   private async handleFeishuMessage(event: MessageReceiveEvent): Promise<void> {
     log.debug('Received message event')
 
@@ -134,6 +172,13 @@ export class FeishuAdapter implements MessengerAdapter {
 
     if (sender.sender_type === 'app') {
       log.debug('Ignoring bot message')
+      return
+    }
+
+    // Dedup replayed events — same message_id within DEDUP_TTL_MS is a no-op.
+    const msgId = message.message_id || ''
+    if (msgId && this.isDuplicate(msgId)) {
+      log.info({ messageId: msgId, event: 'feishu.dedup.skip' }, 'Dropping replayed message_id')
       return
     }
 

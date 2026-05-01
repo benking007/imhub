@@ -354,7 +354,14 @@ export async function callAgentWithHistory(
   const startTime = Date.now()
   ctx.logger.info({ event: 'agent.invoke.start', agent: agent!.name, promptLen: prompt.length, historyLen: history.length })
 
-  const generator = agent!.sendPrompt(sessionId, prompt, history, { model, variant })
+  const generator = agent!.sendPrompt(sessionId, prompt, history, {
+    model,
+    variant,
+    threadId: ctx.threadId,
+    platform: ctx.platform,
+    userId: ctx.userId,
+    channelId: ctx.channelId,
+  })
 
   return (async function* (): AsyncGenerator<string> {
     let fullResponse = ''

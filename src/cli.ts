@@ -13,6 +13,8 @@ import type { MessageContext } from './core/types.js'
 import { generateTraceId, createLogger } from './core/logger.js'
 import { validateConfig } from './core/config-schema.js'
 import { workspaceRegistry } from './core/workspace.js'
+import { approvalBus } from './core/approval-bus.js'
+import { install as installApprovalRouter, tryHandleApprovalReply, platformToMessengerName } from './core/approval-router.js'
 import {
   checkMessengerConfig,
   checkAgentAvailability,
@@ -78,6 +80,20 @@ program
 
     // Initialize session manager
     await sessionManager.start()
+
+    // Start approval-bus before any agent can spawn — failure here is
+    // non-fatal: claude-code falls back to legacy --permission-mode dontAsk.
+    if (process.env.IMHUB_APPROVAL_DISABLED === '1') {
+      console.log('🛑 Approval bus disabled via IMHUB_APPROVAL_DISABLED=1')
+    } else {
+      try {
+        const sockPath = await approvalBus.start()
+        console.log(`✅ Approval bus listening on ${sockPath}`)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.warn(`⚠️ Approval bus failed to start (${msg}); claude-code will fall back to dontAsk mode`)
+      }
+    }
 
     // Load plugins FIRST (agents won't be registered until this runs)
     await registry.loadBuiltInPlugins()
@@ -156,6 +172,17 @@ program
         ctx.traceId = traceId
         ctx.logger = createLogger({ traceId, platform: ctx.platform, component: 'cli' })
         ctx.logger.info({ event: 'message.received', text: ctx.message.text.substring(0, 120), userId: ctx.message.userId })
+
+        // Approval interception comes BEFORE the agent router. If a pending
+        // approval exists for this thread and the message is a y/n-style
+        // reply, we resolve the approval and stop. Anything else routes
+        // normally (with the side effect of auto-denying any stale pending —
+        // see approval-router.ts).
+        if (tryHandleApprovalReply(ctx.message.threadId, ctx.message.text)) {
+          ctx.logger.info({ event: 'message.consumed_by_approval' })
+          return
+        }
+
         await handleMessage(ctx, config.defaultAgent)
       })
 
@@ -172,6 +199,17 @@ program
           console.error(`   ${hint}`)
         }
       }
+    }
+
+    // ============================================
+    // WIRE APPROVAL ROUTER (after messengers are up)
+    // ============================================
+
+    if (approvalBus.getSocketPath()) {
+      installApprovalRouter({
+        resolveMessenger: (platform: string) => registry.getMessenger(platformToMessengerName(platform)),
+      })
+      console.log('✅ Approval router wired to messengers')
     }
 
     // ============================================
@@ -228,6 +266,10 @@ program
           await messenger.stop()
         }
       }
+
+      // Stop approval bus last — denies any in-flight approvals so sidecar
+      // processes don't hang. Always called even if start() failed earlier.
+      try { await approvalBus.stop() } catch { /* ignore */ }
 
       process.exit(0)
     })

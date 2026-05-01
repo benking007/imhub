@@ -131,6 +131,24 @@ export interface MessengerAdapter {
 }
 
 /**
+ * Optional per-call context piped from the IM router into the agent. Lets
+ * adapters (e.g. ClaudeCodeAdapter) route side-channel events back to the
+ * originating IM conversation — for instance, permission prompts surfaced
+ * via approval-bus.
+ *
+ * All fields optional so non-IM call sites (web, scheduler, intent-llm) can
+ * keep calling sendPrompt without adornment.
+ */
+export interface AgentSendOpts {
+  model?: string
+  variant?: string
+  threadId?: string
+  platform?: string
+  userId?: string
+  channelId?: string
+}
+
+/**
  * Adapter interface for AI coding agents (Claude Code, Codex, Copilot)
  *
  * sendPrompt returns an AsyncGenerator for streaming responses.
@@ -140,7 +158,7 @@ export interface MessengerAdapter {
 export interface AgentAdapter {
   readonly name: string
   readonly aliases: string[]
-  sendPrompt(sessionId: string, prompt: string, history?: ChatMessage[], opts?: { model?: string; variant?: string }): AsyncGenerator<string>
+  sendPrompt(sessionId: string, prompt: string, history?: ChatMessage[], opts?: AgentSendOpts): AsyncGenerator<string>
   isAvailable(): Promise<boolean>
 }
 

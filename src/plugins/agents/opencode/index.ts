@@ -2,6 +2,7 @@
 // Uses `opencode run --format json` for programmatic interaction
 
 import { AgentBase } from '../../../core/agent-base.js'
+import type { AgentSendOpts } from '../../../core/types.js'
 
 interface OpenCodeEvent {
   type: string
@@ -14,10 +15,10 @@ export class OpenCodeAdapter extends AgentBase {
   readonly name = 'opencode'
   readonly aliases = ['oc', 'opencodeai']
 
-  protected buildArgs(prompt: string): string[] {
+  protected buildArgs(prompt: string, opts: AgentSendOpts): string[] {
     const args = ['run', '--format', 'json']
-    if (this.currentOpts.model) args.push('--model', this.currentOpts.model)
-    if (this.currentOpts.variant) args.push('--variant', this.currentOpts.variant)
+    if (opts.model) args.push('--model', opts.model)
+    if (opts.variant) args.push('--variant', opts.variant)
     args.push(prompt)
     return args
   }

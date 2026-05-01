@@ -10,7 +10,7 @@
 // Optional override: handleError(), notAvailableMessage(), commandName.
 
 import { StringDecoder } from 'string_decoder'
-import type { AgentAdapter, ChatMessage } from './types.js'
+import type { AgentAdapter, AgentSendOpts, ChatMessage } from './types.js'
 import { crossSpawn } from '../utils/cross-platform.js'
 import { logger as rootLogger } from './logger.js'
 
@@ -95,6 +95,20 @@ export interface SpawnEvent {
   text: string
 }
 
+/**
+ * Self-contained description of a single CLI invocation. Returned by
+ * prepareCommand() and consumed by spawnStream(). All per-call state lives
+ * here — never on the adapter instance — so concurrent sendPrompt() calls
+ * (which is the norm: one IM thread per chat) cannot clobber each other.
+ */
+export interface SpawnPlan {
+  args: string[]
+  /** Extra env merged onto process.env for this spawn. */
+  extraEnv?: Record<string, string>
+  /** Always called once after the CLI exits, even on error/timeout/abort. */
+  cleanup?: () => void | Promise<void>
+}
+
 export abstract class AgentBase implements AgentAdapter {
   abstract readonly name: string
   abstract readonly aliases: string[]
@@ -102,11 +116,24 @@ export abstract class AgentBase implements AgentAdapter {
   /** Binary name to check for isAvailable */
   protected get commandName(): string { return this.name }
 
-  /** Build CLI args array for a given prompt. Override to add model/variant flags. */
-  protected abstract buildArgs(prompt: string): string[]
+  /**
+   * Build CLI args. Pass the per-call opts so model/variant/etc. flow through
+   * without needing instance state. Subclasses doing only synchronous arg
+   * construction can stay here; for async setup (temp files, registry
+   * writes) override prepareCommand() instead.
+   */
+  protected abstract buildArgs(prompt: string, opts: AgentSendOpts): string[]
 
-  /** Current opts set by sendPrompt — subclasses may read in buildArgs. */
-  protected currentOpts: { model?: string; variant?: string } = {}
+  /**
+   * Returns a complete spawn plan. Default implementation just wraps
+   * buildArgs(). Subclasses needing per-call temp resources (mcp-config
+   * file, registered run id, etc.) should override and put ALL derived
+   * state inside the returned plan / closure — never on `this`, since
+   * concurrent spawns would race.
+   */
+  protected async prepareCommand(prompt: string, opts: AgentSendOpts): Promise<SpawnPlan> {
+    return { args: this.buildArgs(prompt, opts) }
+  }
 
   /** Extract text content from a JSONL event object. */
   protected abstract extractText(event: unknown): string
@@ -141,12 +168,11 @@ export abstract class AgentBase implements AgentAdapter {
    * arrives; on non-zero exit, yields the friendly error tail (if any) and
    * returns.
    */
-  async *sendPrompt(_sessionId: string, prompt: string, history?: ChatMessage[], opts?: { model?: string; variant?: string }): AsyncGenerator<string> {
+  async *sendPrompt(_sessionId: string, prompt: string, history?: ChatMessage[], opts?: AgentSendOpts): AsyncGenerator<string> {
     rootLogger.info({ component: `agent.${this.name}`, agent: this.name, historyLen: history?.length || 0 },
       `[${this.name}] sendPrompt`)
-    this.currentOpts = opts || {}
     const contextualPrompt = this.buildContextualPrompt(prompt, history)
-    yield* this.spawnStream(contextualPrompt)
+    yield* this.spawnStream(contextualPrompt, undefined, opts || {})
   }
 
   /**
@@ -174,7 +200,7 @@ export abstract class AgentBase implements AgentAdapter {
    */
   public async spawnAndCollect(prompt: string, signal?: AbortSignal): Promise<string> {
     let acc = ''
-    for await (const chunk of this.spawnStream(prompt, signal)) {
+    for await (const chunk of this.spawnStream(prompt, signal, {})) {
       acc += chunk
     }
     return acc
@@ -185,11 +211,24 @@ export abstract class AgentBase implements AgentAdapter {
    * each extracted text fragment. Handles timeout, abort, and process exit
    * with cleanup of all timers and listeners.
    */
-  protected async *spawnStream(prompt: string, signal?: AbortSignal): AsyncGenerator<string> {
+  protected async *spawnStream(prompt: string, signal?: AbortSignal, opts: AgentSendOpts = {}): AsyncGenerator<string> {
     const timeout = this.timeoutMs
-    const args = this.buildArgs(prompt)
-    const proc = crossSpawn(this.commandName, args, {
+
+    // prepareCommand returns a self-contained plan — args, optional extra env,
+    // optional cleanup. No instance state involved, so concurrent spawnStream
+    // calls cannot race each other. (Previously setupSpawn() would mutate
+    // this.mcpConfigPath etc. between awaits, leading to two parallel claude
+    // runs sharing one mcp.json and the second one finding it already deleted.)
+    let plan: SpawnPlan
+    try {
+      plan = await this.prepareCommand(prompt, opts)
+    } catch (err) {
+      throw err
+    }
+
+    const proc = crossSpawn(this.commandName, plan.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: plan.extraEnv ? { ...process.env, ...plan.extraEnv } : undefined,
     })
 
     const buf = new LineBuffer()
@@ -351,6 +390,12 @@ export abstract class AgentBase implements AgentAdapter {
       clearTimeout(timer)
       if (killTimer) clearTimeout(killTimer)
       if (signal) signal.removeEventListener('abort', onAbort)
+      if (plan.cleanup) {
+        try { await plan.cleanup() } catch (err) {
+          rootLogger.warn({ component: `agent.${this.name}`, agent: this.name, err: String(err) },
+            `[${this.name}] cleanup hook threw`)
+        }
+      }
     }
   }
 }
