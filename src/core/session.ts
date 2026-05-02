@@ -35,8 +35,43 @@ function sessionLogPath(key: string): string {
   const safe = sanitizeKey(key)
   return join(SESSIONS_DIR, `${safe}.log`)
 }
-const DEFAULT_TTL = 30 * 60 * 1000 // 30 minutes
+// Two-tier TTL (split out to fix the "agent drift after long pause" issue):
+//
+//   MESSAGES_TTL  — how long the in-memory chat history sticks around before
+//                   we drop it from RAM and delete the .log file. Short by
+//                   default (30 min) because a long pause usually means the
+//                   user has switched topics; replaying stale messages back to
+//                   the agent just bloats the prompt.
+//
+//   META_TTL      — how long the *session metadata* (agent, model, variant,
+//                   claudeSessionId, claudeSessionPrimed, usage stats) lives
+//                   on disk. Long by default (7 days) so the thread's "sticky
+//                   agent" and resumable claude-code session id survive
+//                   overnight / weekend gaps. Without this, a 30-minute
+//                   silence followed by a coding-keyword message would
+//                   re-classify and switch agents (e.g. claude-code → opencode).
+//
+// Both are env-overridable for ops tuning.
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (!raw) return fallback
+  const n = parseInt(raw, 10)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+const MESSAGES_TTL = envInt('IMHUB_SESSION_MESSAGES_TTL_MS', 30 * 60 * 1000)
+const META_TTL = envInt('IMHUB_SESSION_META_TTL_MS', 7 * 24 * 60 * 60 * 1000)
+// Back-compat: external callers (tests, schedule.ts) used to import DEFAULT_TTL
+// to mean "the one ttl". Keep the symbol pointing at META_TTL so anywhere it
+// still appears in logs/metrics gets the long-lived value.
+const DEFAULT_TTL = META_TTL
 const CLEANUP_INTERVAL = 5 * 60 * 1000 // 5 minutes
+
+function metaStale(s: { lastActivity: Date }, now: number = Date.now()): boolean {
+  return now - s.lastActivity.getTime() > META_TTL
+}
+function messagesStale(s: { lastActivity: Date }, now: number = Date.now()): boolean {
+  return now - s.lastActivity.getTime() > MESSAGES_TTL
+}
 
 class SessionManager {
   private sessions = new Map<string, Session>()
@@ -75,14 +110,15 @@ class SessionManager {
     let session = this.sessions.get(key)
 
     if (session) {
-      // Check if expired
-      if (now.getTime() - session.lastActivity.getTime() > session.ttl) {
-        // Expired — create new
-        session = undefined
+      if (metaStale(session, now.getTime())) {
+        session = undefined  // fully expired → create new below
       } else {
-        // Update activity
+        if (messagesStale(session, now.getTime()) && session.messages.length > 0) {
+          session.messages = []
+          try { await unlink(sessionLogPath(key)) } catch { /* no log to drop */ }
+        }
         session.lastActivity = now
-        await this.saveSession(key, session)
+        await this.saveSessionMeta(key, session)
         return session
       }
     }
@@ -90,11 +126,14 @@ class SessionManager {
     // Try loading from disk
     session = await this.loadSession(key)
 
-    if (session && now.getTime() - session.lastActivity.getTime() <= session.ttl) {
-      // Found and valid
+    if (session && !metaStale(session, now.getTime())) {
+      if (messagesStale(session, now.getTime()) && session.messages.length > 0) {
+        session.messages = []
+        try { await unlink(sessionLogPath(key)) } catch { /* no log to drop */ }
+      }
       session.lastActivity = now
       this.sessions.set(key, session)
-      await this.saveSession(key, session)
+      await this.saveSessionMeta(key, session)
       return session
     }
 
@@ -129,9 +168,14 @@ class SessionManager {
     let session = this.sessions.get(key)
 
     if (session) {
-      // Check if expired
-      if (now.getTime() - session.lastActivity.getTime() > session.ttl) {
+      if (metaStale(session, now.getTime())) {
         return undefined
+      }
+      if (messagesStale(session, now.getTime()) && session.messages.length > 0) {
+        // Drop stale chat history but preserve metadata (sticky agent,
+        // claudeSessionId etc.) — that's the whole point of META_TTL.
+        session.messages = []
+        try { await unlink(sessionLogPath(key)) } catch { /* ignore */ }
       }
       return session
     }
@@ -139,8 +183,11 @@ class SessionManager {
     // Try loading from disk
     session = await this.loadSession(key)
 
-    if (session && now.getTime() - session.lastActivity.getTime() <= session.ttl) {
-      // Found and valid — cache it
+    if (session && !metaStale(session, now.getTime())) {
+      if (messagesStale(session, now.getTime()) && session.messages.length > 0) {
+        session.messages = []
+        try { await unlink(sessionLogPath(key)) } catch { /* ignore */ }
+      }
       this.sessions.set(key, session)
       return session
     }
@@ -608,13 +655,20 @@ class SessionManager {
     const now = Date.now()
 
     for (const [key, session] of this.sessions.entries()) {
-      if (now - session.lastActivity.getTime() > session.ttl) {
+      const idle = now - session.lastActivity.getTime()
+      if (idle > META_TTL) {
+        // Full eviction: thread truly cold. Drop both files + cache entry.
         this.sessions.delete(key)
-
-        // Delete both metadata and the append-only log
         const filePath = sessionFilePath(key)
         const logPath = sessionLogPath(key)
         try { await unlink(filePath) } catch { /* ignore */ }
+        try { await unlink(logPath) } catch { /* ignore */ }
+      } else if (idle > MESSAGES_TTL && session.messages.length > 0) {
+        // Messages-only eviction: keep sticky agent / claudeSessionId on disk
+        // (meta file untouched), drop chat log + in-memory messages so the
+        // next turn starts with a fresh history but the same routing.
+        session.messages = []
+        const logPath = sessionLogPath(key)
         try { await unlink(logPath) } catch { /* ignore */ }
       }
     }
