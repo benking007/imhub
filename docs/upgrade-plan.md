@@ -3,6 +3,9 @@
 > 目标：将 im-hub 从"IM → 多 Agent 桥接器"升级为 **IM 前端 + 多 Agent 后端的智能路由层**
 > 最后更新：2026-04-30
 > 当前分支：feat/gateway-phase1
+>
+> **2026-05-02 后续**：稳态/记忆/工作目录这一轮的升级已开新文档跟踪 → 见
+> [`docs/im-gateway-v2-plan.md`](./im-gateway-v2-plan.md)（A+D 已落地，B+C 待执行）。
 
 ---
 

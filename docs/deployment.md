@@ -1,6 +1,6 @@
 # im-hub 部署指南
 
-> 适用版本：v0.2.13+
+> 适用版本：v0.2.13+（2026-05-02 v2 升级后包括 sticky-agent 绝对锁、双层 TTL、per-Agent 工作目录）
 
 本文档覆盖在 Linux 服务器上部署 im-hub 的完整流程：依赖、构建、systemd 守护、端口暴露、配置、平滑升级。Windows 与 macOS 部署路径相似（仅 systemd 部分需替换）。
 
@@ -119,6 +119,66 @@ im-hub config agent
 ```
 
 不配置任何 workspace 时，默认 workspace 不限制（所有已注册 agent 都可用）。
+
+### 3.4 IM Agent 工作区（v2 升级后默认启用）
+
+通过 IM 入口（微信 / Telegram / 飞书 / Web）调用的 Claude Code 与 opencode，会以
+独立工作目录启动，与你直连终端跑的 `claude` / `opencode` 完全隔离。Web 控制台 /
+定时任务 / intent-llm 路由不走该机制（cwd 不变）。
+
+**默认目录**：
+
+```
+~/.im-hub-workspaces/
+├── claude-code/
+│   ├── CLAUDE.md          # IM 入口的 Claude 角色定义（首次启动种子，后续不覆盖）
+│   └── memory/            # Claude auto-memory（per-cwd 自然落入）
+└── opencode/
+    ├── AGENTS.md          # IM 入口的 opencode 角色定义
+    └── memory/
+```
+
+启动时 im-hub 会幂等创建这两个目录并种入初始模板。**已存在的 CLAUDE.md / AGENTS.md
+不会被覆盖**，可以直接 vim 编辑当作"IM 入口的角色书"。
+
+**调整工作区位置**：
+
+```ini
+# /etc/systemd/system/im-hub.service
+Environment="IMHUB_WORKSPACES_ROOT=/srv/imhub-workspaces"
+# 或单独覆盖某个 agent
+Environment="IMHUB_CLAUDE_CODE_CWD=/srv/imhub/cc"
+Environment="IMHUB_OPENCODE_CWD=/srv/imhub/oc"
+```
+
+**验证**：
+
+```bash
+# 1. 工作区存在 + 种子文件就位
+ls -la ~/.im-hub-workspaces/claude-code/CLAUDE.md
+ls -la ~/.im-hub-workspaces/opencode/AGENTS.md
+
+# 2. 通过 IM 给 Claude 发 "pwd"
+#    → 返回 /root/.im-hub-workspaces/claude-code（而非 /）
+# 3. 通过 IM 给 opencode 发 "pwd"
+#    → 返回 /root/.im-hub-workspaces/opencode
+```
+
+详细使用方式见 [`docs/im-workspaces-guide.md`](./im-workspaces-guide.md)。
+
+### 3.5 会话保持（v2 双层 TTL）
+
+| TTL | 默认 | env 覆盖 | 含义 |
+|---|---|---|---|
+| 消息历史 | 30 min | `IMHUB_SESSION_MESSAGES_TTL_MS` | idle 后清空内存 + 删 `<key>.log` |
+| 会话元数据 | 7 d | `IMHUB_SESSION_META_TTL_MS` | idle 后才完整删 session（含 sticky agent + Claude resumable id） |
+
+**正常含义**：30 min 不说话也不会切 agent；7 天内回来 Claude 还能 `--resume` 续上之前
+的 jsonl 历史。多用户高流量场景可下调 META TTL：
+
+```ini
+Environment="IMHUB_SESSION_META_TTL_MS=86400000"   # 1 天
+```
 
 ---
 
@@ -422,6 +482,37 @@ export IM_HUB_AUDIT_RETENTION_DAYS=1   # 仍写入但只保留 1 天
 
 检查日志的 `level=40` 行；最常见原因是 webhook/long-polling 网络中断。systemd 配 `Restart=always` 让进程重启即可恢复。
 
+### IM 中 Claude 总是漂移到 opencode（或反之）
+
+v0.2.15 + v2 升级后此问题应已修复（sticky-agent 绝对锁 + meta TTL 7d）。如仍发生：
+
+1. 看 `/audit`（IM 内命令）最近一行 `intent` 字段：应为 `sticky`
+2. 检查 `~/.im-hub/sessions/<key>.json` 是否还在（meta TTL 内不应被删）
+3. 没有 `.json` → 说明超过 7d 触发 meta cleanup，属于预期；用 `/cc` 或 `/oc` 重新锁定
+4. 有 `.json` 但 agent 还是被改 → 排查 `intent.ts:classifyIntent` 的早返回逻辑是否生效（`bun test test/unit/intent.test.ts`）
+
+### IM 给 Claude 发 `pwd` 仍返回 `/`
+
+说明 v2 升级后还没重启 im-hub，或 `~/.im-hub-workspaces/` 目录有权限问题。
+
+```bash
+sudo systemctl restart im-hub
+ls -la ~/.im-hub-workspaces/      # 确认存在 + im-hub 可写
+ls /root/workspace/im-hub/dist/core/agent-cwd.js  # 确认新代码已编译
+```
+
+### 想关掉 IM 工作区隔离（回到全局共享）
+
+不推荐（会让 IM 与终端记忆互相污染），但若必须：
+
+```ini
+# 单 agent
+Environment="IMHUB_CLAUDE_CODE_CWD=/"
+Environment="IMHUB_OPENCODE_CWD=/"
+```
+
+或者改源码 `core/agent-cwd.ts:resolveAgentCwd` 让它直接返回 `undefined`。
+
 ### 想把 Web/ACP 暴露到公网
 
 **不要直接开放**。一定要：
@@ -478,6 +569,11 @@ curl -fsS -X POST \
 | `IM_HUB_LLM_JUDGE_AGENT` | （未设） | LLM 兜底路由的 judge agent 名 |
 | `IM_HUB_LLM_JUDGE_THRESHOLD` | `1.0` | judge 触发的规则引擎置信度阈值 |
 | `<AGENT>_TIMEOUT_MS` | `1800000` (30min) | 单 agent 超时（如 `OPENCODE_TIMEOUT_MS`） |
+| `IMHUB_SESSION_MESSAGES_TTL_MS` | `1800000` (30min) | 消息历史 idle TTL（v2 拆分） |
+| `IMHUB_SESSION_META_TTL_MS` | `604800000` (7d) | 会话元数据 idle TTL（v2 拆分，sticky agent + Claude resumable id 寿命） |
+| `IMHUB_WORKSPACES_ROOT` | `~/.im-hub-workspaces` | IM Agent 工作区根目录（v2 引入） |
+| `IMHUB_CLAUDE_CODE_CWD` | （未设） | 单独覆盖 IM 入口 Claude 的 cwd |
+| `IMHUB_OPENCODE_CWD` | （未设） | 单独覆盖 IM 入口 opencode 的 cwd |
 
 ---
 
