@@ -14,6 +14,7 @@ import type { MessageContext } from './core/types.js'
 import { generateTraceId, createLogger } from './core/logger.js'
 import { validateConfig } from './core/config-schema.js'
 import { workspaceRegistry } from './core/workspace.js'
+import { bootstrapAgentWorkspaces } from './core/agent-cwd.js'
 import { approvalBus } from './core/approval-bus.js'
 import { install as installApprovalRouter, tryHandleApprovalReply, platformToMessengerName } from './core/approval-router.js'
 import {
@@ -98,6 +99,20 @@ program
 
     // Load plugins FIRST (agents won't be registered until this runs)
     await registry.loadBuiltInPlugins()
+
+    // Bootstrap per-agent IM workspaces. Idempotent — creates
+    // ~/.im-hub-workspaces/<agent>/ and seeds CLAUDE.md / AGENTS.md only if
+    // they don't exist yet. See docs/architecture/agent-cwd-and-memory.md.
+    try {
+      const bootstrapped = await bootstrapAgentWorkspaces()
+      for (const { agent, dir } of bootstrapped) {
+        console.log(`📁 Agent workspace: ${agent} → ${dir}`)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`⚠️ Agent workspace bootstrap failed: ${msg}`)
+      console.warn('   Agents will fall back to im-hub cwd ("/" under systemd)')
+    }
 
     // Load ACP (remote) agents from config
     if (config.acpAgents?.length) {

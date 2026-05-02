@@ -31,6 +31,7 @@ import { dirname, join } from 'path'
 import { AgentBase, type SpawnPlan } from '../../../core/agent-base.js'
 import type { AgentSendOpts } from '../../../core/types.js'
 import { approvalBus } from '../../../core/approval-bus.js'
+import { resolveAgentCwd } from '../../../core/agent-cwd.js'
 import { logger as rootLogger } from '../../../core/logger.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -77,17 +78,25 @@ export class ClaudeCodeAdapter extends AgentBase {
   }
 
   protected async prepareCommand(prompt: string, opts: AgentSendOpts): Promise<SpawnPlan> {
+    // Cwd is computed once and shared by all return paths below — both the
+    // approval-routed path and every fallback ("dontAsk", missing IM context,
+    // tmpdir failure, etc.). Skipping cwd on the fallbacks would silently
+    // demote those calls back to im-hub's "/" cwd and leak across memory.
+    const cwd = resolveAgentCwd(this.name, opts)
+
     if (process.env.IMHUB_APPROVAL_DISABLED === '1') {
-      return { args: this.buildArgs(prompt, opts) }
+      return { args: this.buildArgs(prompt, opts), cwd }
     }
 
     const sockPath = approvalBus.getSocketPath()
-    if (!sockPath) return { args: this.buildArgs(prompt, opts) } // bus not started
+    if (!sockPath) return { args: this.buildArgs(prompt, opts), cwd } // bus not started
 
     const { threadId, platform, channelId, userId } = opts
     if (!threadId || !platform || !channelId) {
-      // Non-IM call (web/scheduler/intent-llm) — no thread to route prompts to
-      return { args: this.buildArgs(prompt, opts) }
+      // Non-IM call (web/scheduler/intent-llm) — no thread to route prompts to.
+      // resolveAgentCwd returns undefined here too, so cwd ends up undefined and
+      // the spawn inherits im-hub's cwd, matching the historical behavior.
+      return { args: this.buildArgs(prompt, opts), cwd }
     }
 
     const runId = randomUUID()
@@ -121,7 +130,7 @@ export class ClaudeCodeAdapter extends AgentBase {
       log.warn({ event: 'claude.approval.write_config_failed', err: String(err) },
         'Falling back to dontAsk: cannot write mcp-config')
       try { await rm(configDir, { recursive: true, force: true }) } catch { /* ignore */ }
-      return { args: this.buildArgs(prompt, opts) }
+      return { args: this.buildArgs(prompt, opts), cwd }
     }
 
     approvalBus.registerRun(runId, {
@@ -145,6 +154,7 @@ export class ClaudeCodeAdapter extends AgentBase {
         '--permission-prompt-tool', 'mcp__imhub__request',
         prompt,
       ],
+      cwd,
       cleanup: async () => {
         approvalBus.unregisterRun(runId)
         try { await rm(configDir, { recursive: true, force: true }) } catch { /* ignore */ }

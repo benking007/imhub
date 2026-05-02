@@ -1,8 +1,9 @@
 // OpenCode CLI agent adapter
 // Uses `opencode run --format json` for programmatic interaction
 
-import { AgentBase } from '../../../core/agent-base.js'
+import { AgentBase, type SpawnPlan } from '../../../core/agent-base.js'
 import type { AgentSendOpts } from '../../../core/types.js'
+import { resolveAgentCwd } from '../../../core/agent-cwd.js'
 
 interface OpenCodeEvent {
   type: string
@@ -21,6 +22,19 @@ export class OpenCodeAdapter extends AgentBase {
     if (opts.variant) args.push('--variant', opts.variant)
     args.push(prompt)
     return args
+  }
+
+  /**
+   * opencode keys its per-project AGENTS.md and memory off the spawn cwd,
+   * so for IM calls we pin to ~/.im-hub-workspaces/opencode/. Non-IM calls
+   * (web/scheduler) keep cwd undefined and inherit im-hub's cwd, preserving
+   * the prior behavior. See agent-cwd.ts for full rationale.
+   */
+  protected async prepareCommand(prompt: string, opts: AgentSendOpts): Promise<SpawnPlan> {
+    return {
+      args: this.buildArgs(prompt, opts),
+      cwd: resolveAgentCwd(this.name, opts),
+    }
   }
 
   protected extractText(event: unknown): string {

@@ -105,6 +105,14 @@ export interface SpawnPlan {
   args: string[]
   /** Extra env merged onto process.env for this spawn. */
   extraEnv?: Record<string, string>
+  /**
+   * Working directory for the spawned CLI. Adapters use this to give each
+   * agent (claude-code, opencode) its own isolated cwd in the IM context, so
+   * Claude's per-cwd memory / project history and opencode's AGENTS.md don't
+   * collide with the user's terminal sessions. Falls through to inherit
+   * im-hub's own cwd ("/" under systemd) when undefined.
+   */
+  cwd?: string
   /** Always called once after the CLI exits, even on error/timeout/abort. */
   cleanup?: () => void | Promise<void>
 }
@@ -229,6 +237,7 @@ export abstract class AgentBase implements AgentAdapter {
     const proc = crossSpawn(this.commandName, plan.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: plan.extraEnv ? { ...process.env, ...plan.extraEnv } : undefined,
+      cwd: plan.cwd,
     })
 
     const buf = new LineBuffer()
