@@ -13,6 +13,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { mkdir, readFile, writeFile, rename, unlink, appendFile, readdir } from 'fs/promises'
 import type { Session, ChatMessage, SubtaskMeta } from './types.js'
+import { approvalBus } from './approval-bus.js'
 import { logger as rootLogger } from './logger.js'
 
 const log = rootLogger.child({ component: 'session' })
@@ -313,6 +314,9 @@ class SessionManager {
       // Forget the old claude session — /new should give a clean slate.
       delete session.claudeSessionId
       delete session.claudeSessionPrimed
+      // Drop any per-thread auto-allow approval rules so the new conversation
+      // starts back at "ask every time".
+      try { approvalBus.clearAutoAllowForThread(threadId) } catch { /* ignore */ }
       this.sessions.set(key, session)
       await this.saveSession(key, session)
       return session

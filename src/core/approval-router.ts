@@ -20,6 +20,12 @@ const ALLOW_TOKENS = new Set([
 const DENY_TOKENS = new Set([
   'n', 'no', '0', '拒绝', '不同意', '不行', '不可以', '不', '❌',
 ])
+/** "Approve this and auto-approve future calls of the same tool with the
+ *  same input prefix in this session." Bus consumes `autoAllowFurther` and
+ *  registers the rule. */
+const ALLOW_ALL_TOKENS = new Set([
+  'all', 'a', '全部', '总是', '都同意', '都批准',
+])
 
 /**
  * Classify an inbound IM reply as an approval decision. Returns null when the
@@ -31,6 +37,9 @@ export function parseApprovalReply(text: string): Decision | null {
   if (!trimmed) return null
   // Strip leading slashes so "/y" works too — some users do that on Telegram.
   const stripped = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed
+  if (ALLOW_ALL_TOKENS.has(stripped)) {
+    return { behavior: 'allow', autoAllowFurther: true }
+  }
   if (ALLOW_TOKENS.has(stripped)) {
     return { behavior: 'allow' }
   }
@@ -44,14 +53,28 @@ export function parseApprovalReply(text: string): Decision | null {
  * Render an approval request as a plain text message. We keep this format
  * stable across IM platforms; richer flows (Feishu cards with buttons) can
  * layer on later by checking platform/sendCard.
+ *
+ * Two flavors:
+ *   - Normal: "y 批准 / n 拒绝 / all 同意并对该工具同类调用 5s 自动放行"
+ *   - Auto-allow grace mode (n.autoAllow set): "⏱ 自动放行中… 5s 内回 n 可拒绝"
  */
 export function formatApprovalPrompt(n: ApprovalNotification): string {
   const inputJson = safeStringify(n.input, MAX_INPUT_PREVIEW)
+  if (n.autoAllow) {
+    const sec = Math.round(n.autoAllow.graceMs / 1000)
+    return [
+      `⏱ 自动放行中（${sec}s 后执行）`,
+      `工具：${n.toolName}`,
+      `入参：${inputJson}`,
+      `回复 n 可拒绝（同时撤销该工具的自动放行规则）`,
+      `req: ${n.reqId.slice(0, 8)}`,
+    ].join('\n')
+  }
   return [
     '🔐 工具调用审批请求',
     `工具：${n.toolName}`,
     `入参：${inputJson}`,
-    `回复 y 批准 / n 拒绝（5 分钟内未操作将自动拒绝）`,
+    `回复 y 批准 / n 拒绝 / all 本会话内同工具同前缀自动放行（5 分钟内未操作将自动拒绝）`,
     `req: ${n.reqId.slice(0, 8)}`,
   ].join('\n')
 }

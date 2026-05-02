@@ -61,6 +61,31 @@ describe('parseApprovalReply', () => {
     expect(r.behavior).toBe('deny')
     expect(r.message).toContain('用户')
   })
+
+  it.each([
+    ['all'], ['ALL'], ['a'], ['全部'], ['总是'], ['都同意'], ['都批准'],
+    ['  all  '], ['/all'],
+  ])('parses %p as allow + autoAllowFurther', (input) => {
+    const r = parseApprovalReply(input) as Decision & { autoAllowFurther?: boolean }
+    expect(r?.behavior).toBe('allow')
+    expect(r?.autoAllowFurther).toBe(true)
+  })
+})
+
+describe('formatApprovalPrompt — auto-allow grace mode', () => {
+  it('renders a softer prompt with countdown when n.autoAllow is set', () => {
+    const n: ApprovalNotification = {
+      runId: 'r', reqId: 'abcdef0123', toolName: 'Bash',
+      input: { command: 'ls -la' }, toolUseId: 'tu', ctx: RUN_CTX,
+      autoAllow: { graceMs: 5000 },
+    }
+    const text = formatApprovalPrompt(n)
+    expect(text).toContain('5s')
+    expect(text).toContain('自动放行')
+    expect(text).toContain('n')   // still tells user how to reject
+    expect(text).toContain('Bash')
+    expect(text).toContain('ls -la')
+  })
 })
 
 describe('platformToMessengerName', () => {

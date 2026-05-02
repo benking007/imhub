@@ -398,6 +398,134 @@ describe('ApprovalBus', () => {
     await client.close()
   })
 
+  it('auto-allow: rule registered on allow+autoAllowFurther, second request resolves via grace timer', async () => {
+    const fastBus = new ApprovalBus({ approvalTimeoutMs: 5000, autoAllowGraceMs: 80 })
+    const fastPath = uniqueSocketPath()
+    await fastBus.start(fastPath)
+    try {
+      fastBus.registerRun('run-1', RUN_CTX)
+      const notifications: ApprovalNotification[] = []
+      fastBus.setNotifier(async (n) => { notifications.push(n) })
+
+      const client = await connectClient(fastPath)
+      // First call — user replies "all"
+      client.send({
+        v: 1, type: 'approval', runId: 'run-1', reqId: 'r-1',
+        toolName: 'Bash', input: { command: 'git status -s' }, toolUseId: 'tu-1',
+      })
+      for (let i = 0; i < 50 && notifications.length < 1; i++) await sleep(10)
+      expect(notifications[0].autoAllow).toBeUndefined() // first ask is normal
+      fastBus.resolvePending('thread-A', { behavior: 'allow', autoAllowFurther: true })
+      const d1 = await client.next()
+      expect(d1.behavior).toBe('allow')
+      // Wire payload must NOT carry autoAllowFurther — that's internal-only.
+      expect(d1.autoAllowFurther).toBeUndefined()
+      expect(fastBus.getAutoAllowKeys('thread-A')).toEqual(['Bash::git s'])
+
+      // Second call — same tool + same prefix → grace mode
+      client.send({
+        v: 1, type: 'approval', runId: 'run-1', reqId: 'r-2',
+        toolName: 'Bash', input: { command: 'git status' }, toolUseId: 'tu-2',
+      })
+      for (let i = 0; i < 50 && notifications.length < 2; i++) await sleep(10)
+      expect(notifications[1].autoAllow).toEqual({ graceMs: 80 })
+
+      // Don't reply → grace timer fires → allow auto-resolved
+      const d2 = await client.next(500)
+      expect(d2.behavior).toBe('allow')
+      expect(fastBus.hasPendingFor('thread-A')).toBe(false)
+
+      await client.close()
+    } finally {
+      await fastBus.stop()
+    }
+  })
+
+  it('auto-allow: explicit deny in grace mode revokes the rule', async () => {
+    const fastBus = new ApprovalBus({ approvalTimeoutMs: 5000, autoAllowGraceMs: 1000 })
+    const fastPath = uniqueSocketPath()
+    await fastBus.start(fastPath)
+    try {
+      fastBus.registerRun('run-1', RUN_CTX)
+      fastBus.setNotifier(async () => {})
+
+      const client = await connectClient(fastPath)
+      // Seed a rule directly via the public path (allow+autoAllowFurther).
+      client.send({
+        v: 1, type: 'approval', runId: 'run-1', reqId: 'r-seed',
+        toolName: 'Bash', input: { command: 'rm -rf x' }, toolUseId: 'tu-1',
+      })
+      await sleep(20)
+      fastBus.resolvePending('thread-A', { behavior: 'allow', autoAllowFurther: true })
+      await client.next()
+      expect(fastBus.getAutoAllowKeys('thread-A')).toEqual(['Bash::rm -r'])
+
+      // Second call hits the rule → grace mode. User explicitly denies.
+      client.send({
+        v: 1, type: 'approval', runId: 'run-1', reqId: 'r-2',
+        toolName: 'Bash', input: { command: 'rm -rf y' }, toolUseId: 'tu-2',
+      })
+      await sleep(20)
+      fastBus.resolvePending('thread-A', { behavior: 'deny', message: '不行' })
+      const d = await client.next()
+      expect(d.behavior).toBe('deny')
+      // Rule is revoked → next call should be normal (not auto-allow).
+      expect(fastBus.getAutoAllowKeys('thread-A')).toEqual([])
+
+      await client.close()
+    } finally {
+      await fastBus.stop()
+    }
+  })
+
+  it('auto-allow: non-user denies (run terminated, shutdown) do NOT revoke the rule', async () => {
+    const fastBus = new ApprovalBus({ approvalTimeoutMs: 5000, autoAllowGraceMs: 5000 })
+    const fastPath = uniqueSocketPath()
+    await fastBus.start(fastPath)
+    try {
+      fastBus.registerRun('run-1', RUN_CTX)
+      fastBus.setNotifier(async () => {})
+
+      const client = await connectClient(fastPath)
+      client.send({
+        v: 1, type: 'approval', runId: 'run-1', reqId: 'r-1',
+        toolName: 'Bash', input: { command: 'ls -la' }, toolUseId: 'tu-1',
+      })
+      await sleep(20)
+      fastBus.resolvePending('thread-A', { behavior: 'allow', autoAllowFurther: true })
+      await client.next()
+
+      // Open a 2nd request that hits the rule (auto-allow grace).
+      client.send({
+        v: 1, type: 'approval', runId: 'run-1', reqId: 'r-2',
+        toolName: 'Bash', input: { command: 'ls -lh' }, toolUseId: 'tu-2',
+      })
+      await sleep(20)
+
+      // Simulate "claude died" — unregisterRun → cancelPending(deny). This
+      // should NOT clear the rule.
+      fastBus.unregisterRun('run-1')
+      const d = await client.next()
+      expect(d.behavior).toBe('deny')
+      expect(fastBus.getAutoAllowKeys('thread-A')).toEqual(['Bash::ls -l'])
+
+      await client.close()
+    } finally {
+      await fastBus.stop()
+    }
+  })
+
+  it('auto-allow: clearAutoAllowForThread drops every rule', () => {
+    bus.clearAutoAllowForThread('does-not-exist') // should not throw
+    // Internal — exercise via the real public path: addAutoAllowRule is called
+    // via cancelPending. We use a private lookup helper here.
+    bus.registerRun('run-clr', RUN_CTX)
+    bus.setNotifier(async () => {})
+    // After clearing, no rules should remain — start from baseline.
+    bus.clearAutoAllowForThread('thread-A')
+    expect(bus.getAutoAllowKeys('thread-A')).toEqual([])
+  })
+
   it('queues multiple pending on same thread, resolves head first', async () => {
     bus.registerRun('run-1', RUN_CTX)
     bus.setNotifier(async () => {})

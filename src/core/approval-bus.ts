@@ -22,8 +22,15 @@ import { logger as rootLogger } from './logger.js'
 const log = rootLogger.child({ component: 'approval-bus' })
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
+const DEFAULT_AUTO_ALLOW_GRACE_MS = 5 * 1000
 const MAX_LINE_BYTES = 256 * 1024
 const MAX_BUFFER_BYTES = MAX_LINE_BYTES * 4
+
+/** Length of the input prefix used to fingerprint an auto-allow rule.
+ *  `(toolName, input-prefix)` is the dedup key. Short enough to cover
+ *  benign repeats (`git status` ≈ `git s`) without granting blanket
+ *  authority over a whole tool family (`rm -r…` ≠ `git s…`). */
+const AUTO_ALLOW_PREFIX_LEN = 5
 
 export interface RunContext {
   threadId: string
@@ -32,8 +39,10 @@ export interface RunContext {
   channelId: string
 }
 
+/** Wire-format decision sent back to the sidecar. `autoAllowFurther` is
+ *  internal-only — `sendDecision` strips it before serializing. */
 export type Decision =
-  | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
+  | { behavior: 'allow'; updatedInput?: Record<string, unknown>; autoAllowFurther?: boolean }
   | { behavior: 'deny'; message?: string }
 
 export interface ApprovalNotification {
@@ -43,6 +52,11 @@ export interface ApprovalNotification {
   input: Record<string, unknown>
   toolUseId: string
   ctx: RunContext
+  /** Present iff this request matched a per-thread auto-allow rule. The
+   *  notifier should render a softer prompt ("⏱ 自动放行中, 5s 内回 n 可拒绝")
+   *  instead of the regular y/n one — the bus will allow on timer expiry,
+   *  unless the user actively denies first. */
+  autoAllow?: { graceMs: number }
 }
 
 /** Notifier 只负责"通知 IM 推卡片/消息"。不要在这里返回决策；决策走 resolvePending。 */
@@ -53,28 +67,43 @@ interface PendingApproval {
   reqId: string
   toolName: string
   threadId: string
+  /** Truncated input fingerprint used for auto-allow lookups + revocation. */
+  fingerprint: string
   socket: Socket
   timer: ReturnType<typeof setTimeout>
   resolved: boolean
+  /** When true, this pending was created in auto-allow mode: timer expiry
+   *  resolves to allow rather than deny, and an explicit deny revokes the
+   *  matching auto-allow rule. */
+  autoAllow: boolean
 }
 
 export interface ApprovalBusOptions {
   approvalTimeoutMs?: number
+  /** Window between sending the auto-allow notice and auto-resolving as
+   *  allow (when the user doesn't actively deny in the meantime). */
+  autoAllowGraceMs?: number
 }
 
 export class ApprovalBus {
   private server: Server | null = null
   private socketPath: string | null = null
   private readonly approvalTimeoutMs: number
+  private readonly autoAllowGraceMs: number
 
   private runContexts = new Map<string, RunContext>()
   private pendingById = new Map<string, PendingApproval>()
   private pendingByThread = new Map<string, PendingApproval[]>()
   private connections = new Set<Socket>()
   private notifier: ApprovalNotifier | null = null
+  /** threadId → set of `${toolName}::${prefix}` keys the user has marked
+   *  as auto-allow within this conversation. Cleared by clearAutoAllowForThread
+   *  (called from session.resetConversation) and on stop(). */
+  private autoAllowByThread = new Map<string, Set<string>>()
 
   constructor(opts: ApprovalBusOptions = {}) {
     this.approvalTimeoutMs = opts.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS
+    this.autoAllowGraceMs = opts.autoAllowGraceMs ?? DEFAULT_AUTO_ALLOW_GRACE_MS
   }
 
   /** 注入"通知 IM 推送"的回调。messenger 层启动时调一次。 */
@@ -110,6 +139,7 @@ export class ApprovalBus {
     this.runContexts.clear()
     this.pendingById.clear()
     this.pendingByThread.clear()
+    this.autoAllowByThread.clear()
 
     // server.close() doesn't terminate existing connections. Half-close each
     // (so the deny payload buffered above gets flushed) and fall back to
@@ -154,13 +184,33 @@ export class ApprovalBus {
   /**
    * 由 messenger.onMessage 拦截层调用。把 thread 队列头部的 pending 用
    * 给定决策 resolve 掉。返回是否真的 resolve 到了一个 pending。
+   *
+   * Auto-allow side-effect: a user-initiated deny against a pending that
+   * was running in auto-allow mode revokes the matching rule (the user is
+   * signaling "stop auto-approving this"). Revocation is intentionally
+   * scoped to this user-path so sidecar disconnects / shutdown / run-
+   * terminated denies don't accidentally clear rules the user still wants.
    */
   resolvePending(threadId: string, decision: Decision): boolean {
     const q = this.pendingByThread.get(threadId)
     const head = q?.[0]
     if (!head) return false
+    if (decision.behavior === 'deny' && head.autoAllow) {
+      this.removeAutoAllowRule(head.threadId, head.toolName, head.fingerprint)
+    }
     this.cancelPending(head, decision)
     return true
+  }
+
+  /** Drop every auto-allow rule registered for this thread. Called from
+   *  session.resetConversation so `/new` truly returns to "ask every time". */
+  clearAutoAllowForThread(threadId: string): void {
+    this.autoAllowByThread.delete(threadId)
+  }
+
+  /** Test/diagnostic helper — current rule keys for a thread. */
+  getAutoAllowKeys(threadId: string): string[] {
+    return [...(this.autoAllowByThread.get(threadId) ?? [])]
   }
 
   /** 测试用：当前 socket 路径。 */
@@ -266,26 +316,43 @@ export class ApprovalBus {
       return
     }
 
+    const fingerprint = inputFingerprint(input)
+    const ruleKey = autoAllowRuleKey(toolName, fingerprint)
+    const isAutoAllow = this.autoAllowByThread.get(ctx.threadId)?.has(ruleKey) ?? false
+    const timeoutMs = isAutoAllow ? this.autoAllowGraceMs : this.approvalTimeoutMs
+
     const pending: PendingApproval = {
       runId,
       reqId,
       toolName,
       threadId: ctx.threadId,
+      fingerprint,
       socket,
       resolved: false,
+      autoAllow: isAutoAllow,
       timer: setTimeout(() => {
-        this.cancelPending(pending, { behavior: 'deny', message: 'approval timeout' })
-      }, this.approvalTimeoutMs),
+        // In auto-allow mode the timer is the *grace* timer — expiry means
+        // "user didn't object in time, proceed". In normal mode it's the
+        // hard-deny timeout.
+        if (isAutoAllow) {
+          this.cancelPending(pending, { behavior: 'allow' })
+        } else {
+          this.cancelPending(pending, { behavior: 'deny', message: 'approval timeout' })
+        }
+      }, timeoutMs),
     }
     this.pendingById.set(reqId, pending)
     const q = this.pendingByThread.get(ctx.threadId) ?? []
     q.push(pending)
     this.pendingByThread.set(ctx.threadId, q)
 
-    log.info({ event: 'approval.bus.request', runId, reqId, toolName, threadId: ctx.threadId })
+    log.info({ event: 'approval.bus.request', runId, reqId, toolName, threadId: ctx.threadId, autoAllow: isAutoAllow })
 
     try {
-      await this.notifier({ runId, reqId, toolName, input, toolUseId, ctx })
+      await this.notifier({
+        runId, reqId, toolName, input, toolUseId, ctx,
+        ...(isAutoAllow ? { autoAllow: { graceMs: this.autoAllowGraceMs } } : {}),
+      })
     } catch (err) {
       log.error({ event: 'approval.bus.notifier_error', reqId, err: String(err) })
       this.cancelPending(pending, { behavior: 'deny', message: 'notifier error' })
@@ -296,8 +363,34 @@ export class ApprovalBus {
     if (p.resolved) return
     p.resolved = true
     clearTimeout(p.timer)
+
+    // The "register on allow+all" side-effect lives here (covers any path
+    // through cancelPending — both resolvePending and the grace timer).
+    // The "revoke on user-deny" side-effect lives in resolvePending instead,
+    // so non-user denies (run terminated, sidecar disconnect, shutdown)
+    // don't accidentally clear rules the user still wants.
+    if (decision.behavior === 'allow' && decision.autoAllowFurther) {
+      this.addAutoAllowRule(p.threadId, p.toolName, p.fingerprint)
+    }
+
     this.sendDecision(p.socket, p.reqId, decision)
     this.removePending(p)
+  }
+
+  private addAutoAllowRule(threadId: string, toolName: string, fingerprint: string): void {
+    const key = autoAllowRuleKey(toolName, fingerprint)
+    let set = this.autoAllowByThread.get(threadId)
+    if (!set) { set = new Set(); this.autoAllowByThread.set(threadId, set) }
+    set.add(key)
+    log.info({ event: 'approval.bus.autoallow_added', threadId, toolName, fingerprint })
+  }
+
+  private removeAutoAllowRule(threadId: string, toolName: string, fingerprint: string): void {
+    const key = autoAllowRuleKey(toolName, fingerprint)
+    const set = this.autoAllowByThread.get(threadId)
+    if (!set) return
+    if (set.delete(key) && set.size === 0) this.autoAllowByThread.delete(threadId)
+    log.info({ event: 'approval.bus.autoallow_removed', threadId, toolName, fingerprint })
   }
 
   private removePending(p: PendingApproval): void {
@@ -311,11 +404,45 @@ export class ApprovalBus {
 
   private sendDecision(socket: Socket, reqId: string, decision: Decision): void {
     if (!socket.writable) return
-    const payload = JSON.stringify({ v: 1, type: 'decision', reqId, ...decision }) + '\n'
+    // Strip internal-only flags (e.g. autoAllowFurther) — sidecar only
+    // understands the wire schema.
+    const wire: Record<string, unknown> = { v: 1, type: 'decision', reqId, behavior: decision.behavior }
+    if (decision.behavior === 'allow' && decision.updatedInput) {
+      wire.updatedInput = decision.updatedInput
+    } else if (decision.behavior === 'deny' && decision.message) {
+      wire.message = decision.message
+    }
+    const payload = JSON.stringify(wire) + '\n'
     socket.write(payload, (err) => {
       if (err) log.warn({ event: 'approval.bus.write_failed', reqId, err: String(err) })
     })
   }
+}
+
+function autoAllowRuleKey(toolName: string, fingerprint: string): string {
+  return `${toolName}::${fingerprint}`
+}
+
+/**
+ * Pick a stable, short prefix of the input as the auto-allow fingerprint.
+ *
+ * Strategy: try the field most users mean when they say "this kind of
+ * call" for the common Claude tools (Bash → command, Write/Edit/Read →
+ * file_path, etc.); fall back to a stringified snapshot. Always truncated
+ * to AUTO_ALLOW_PREFIX_LEN so the rule covers small variations of the
+ * same operation but not unrelated ones.
+ */
+function inputFingerprint(input: Record<string, unknown>): string {
+  const FIELDS = ['command', 'file_path', 'path', 'url', 'pattern', 'query']
+  for (const f of FIELDS) {
+    const v = input[f]
+    if (typeof v === 'string' && v.length > 0) {
+      return v.slice(0, AUTO_ALLOW_PREFIX_LEN)
+    }
+  }
+  let s: string
+  try { s = JSON.stringify(input) } catch { s = '' }
+  return s.slice(0, AUTO_ALLOW_PREFIX_LEN)
 }
 
 function defaultSocketPath(): string {
