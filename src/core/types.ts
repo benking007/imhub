@@ -93,6 +93,11 @@ export interface Session {
    *  cli uses it to decide between `--session-id` (fresh, allowed once) and
    *  `--resume` (subsequent turns). Cleared by /new. */
   claudeSessionPrimed?: boolean
+  /** opencode session id (`ses_…`) discovered from opencode's first JSON event
+   *  on a fresh run. Subsequent turns pass `--session <id>` so opencode
+   *  resumes the same conversation from its own DB and im-hub no longer needs
+   *  to stitch the history into the prompt. Cleared by /new. */
+  opencodeSessionId?: string
 }
 
 export interface SessionUsage {
@@ -180,6 +185,16 @@ export interface AgentSendOpts {
    *  `agentSessionId` rather than create a new one. claude-code translates
    *  this to `--resume <uuid>` instead of `--session-id <uuid>`. */
   agentSessionResume?: boolean
+  /** Optional one-shot callback for adapters whose CLI generates the session
+   *  id itself (rather than letting im-hub pre-allocate). opencode emits
+   *  `sessionID` in every JSON event; the adapter calls this when it sees
+   *  the id so cli can persist it on the im-hub session row for next turn.
+   *  Idempotent: same id may fire multiple times per spawn. */
+  onAgentSessionId?: (id: string) => void
+  /** Optional callback for adapters that surface usage data inline (cost +
+   *  tokens). opencode's `step_finish` event carries this; cli accumulates
+   *  the deltas to feed `recordUsage` so /stats reflects opencode cost. */
+  onUsage?: (delta: { costUsd?: number; tokensInput?: number; tokensOutput?: number }) => void
 }
 
 /**

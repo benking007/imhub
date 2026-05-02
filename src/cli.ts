@@ -405,6 +405,23 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
         // (continues). Track via claudeSessionPrimed on the session.
         claudeRunWillResume = !!stickySession?.claudeSessionPrimed
         routeCtx.agentSessionResume = claudeRunWillResume
+      } else if (agentForRun === 'opencode') {
+        // opencode generates its own session id (`ses_…`) on first run; we
+        // capture it from the JSON event stream rather than pre-allocating.
+        // If we already have one for this thread, hand it back so opencode
+        // resumes from its own DB and we skip stitching messages into the
+        // prompt (router clears history when agentSessionResume is true).
+        const ocId = stickySession?.opencodeSessionId
+        if (ocId) {
+          routeCtx.agentSessionId = ocId
+          routeCtx.agentSessionResume = true
+        }
+        // Make sure the session row exists so the subsequent
+        // setOpencodeSessionId callback (fired from the adapter) has
+        // somewhere to write to.
+        await sessionManager.getOrCreateSession(
+          platform, ctx.channelId, message.threadId, agentForRun,
+        )
       }
     }
 

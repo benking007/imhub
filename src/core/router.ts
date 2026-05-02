@@ -374,6 +374,20 @@ export async function callAgentWithHistory(
   // claude relies purely on its native session memory.
   const effectiveHistory = ctx.agentSessionResume ? [] : history
 
+  // Per-call accumulators for adapters that surface usage / session-id
+  // inline (currently opencode). Closure-bound so concurrent runs can't
+  // race each other.
+  let usageAcc = 0
+  const onAgentSessionId = (id: string): void => {
+    // opencode's sessionID. Persist on first sighting so the next turn can
+    // pass --session <id>. setOpencodeSessionId is idempotent.
+    void sessionManager.setOpencodeSessionId(ctx.platform, ctx.channelId, ctx.threadId, id)
+      .catch((err) => ctx.logger.debug({ err: String(err) }, 'setOpencodeSessionId failed'))
+  }
+  const onUsage = (delta: { costUsd?: number; tokensInput?: number; tokensOutput?: number }): void => {
+    if (typeof delta.costUsd === 'number' && Number.isFinite(delta.costUsd)) usageAcc += delta.costUsd
+  }
+
   const generator = agent!.sendPrompt(sessionId, prompt, effectiveHistory, {
     model,
     variant,
@@ -383,6 +397,8 @@ export async function callAgentWithHistory(
     channelId: ctx.channelId,
     agentSessionId: ctx.agentSessionId,
     agentSessionResume: ctx.agentSessionResume,
+    onAgentSessionId,
+    onUsage,
   })
 
   return (async function* (): AsyncGenerator<string> {
@@ -412,11 +428,13 @@ export async function callAgentWithHistory(
         responseLen: fullResponse.length,
       })
 
-      // Write audit record + update circuit breaker. Cost defaults to 0
-      // for adapters that don't surface usage; future per-agent enrichers
-      // can attach a `lastUsageCost` getter for token-based pricing.
+      // Cost: prefer the inline usage accumulator (opencode emits this in
+      // step_finish events), fall back to legacy `getLastCost` for any
+      // adapter that still uses it. Adapters with no usage path default
+      // to 0.
       const costFn = (agent as unknown as { getLastCost?: () => number })?.getLastCost
-      const cost = typeof costFn === 'function' ? Number(costFn.call(agent)) || 0 : 0
+      const legacyCost = typeof costFn === 'function' ? Number(costFn.call(agent)) || 0 : 0
+      const cost = usageAcc > 0 ? usageAcc : legacyCost
 
       logInvocation({
         traceId: ctx.traceId,

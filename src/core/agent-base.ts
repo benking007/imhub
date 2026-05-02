@@ -146,6 +146,16 @@ export abstract class AgentBase implements AgentAdapter {
   /** Extract text content from a JSONL event object. */
   protected abstract extractText(event: unknown): string
 
+  /**
+   * Optional side-channel hook fired for every parsed JSONL event before
+   * extractText. Default no-op. Used by adapters whose CLI surfaces metadata
+   * (session id, cost, token counts) inline with content events — they
+   * dispatch back to the caller via `opts.onAgentSessionId` / `opts.onUsage`.
+   *
+   * Keep it cheap: this runs on the hot stdout path. No network or disk.
+   */
+  protected inspectEvent(_event: unknown, _opts: AgentSendOpts): void { /* default no-op */ }
+
   /** Optional: transform error info into a user-friendly message string (resolved instead of rejected). */
   protected handleError(_code: number, _stderr: string, _errorMessage: string): string | null {
     return null // default: reject
@@ -297,6 +307,7 @@ export abstract class AgentBase implements AgentAdapter {
             // Don't yield error event content alongside extractText
             continue
           }
+          this.inspectEvent(event, opts)
           const text = this.extractText(event)
           if (text) pendingChunks.push(text)
         } catch {

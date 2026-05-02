@@ -196,8 +196,19 @@ class SessionManager {
   }
 
   /**
-   * Switch the agent for a session
-   * Generates a new session ID but preserves thread identity
+   * Switch the agent for a session.
+   *
+   * Generates a new session id but preserves thread identity AND every
+   * thread-level field that isn't agent-specific:
+   *   - usage             (per-thread /stats roll-up)
+   *   - subtasks/active   (subtask state lives at thread level)
+   *   - claudeSessionId   (Claude UUID survives /oc → /cc round-trips so the
+   *                        underlying ~/.claude/projects jsonl keeps continuing
+   *                        when the user comes back to claude)
+   *
+   * `model` and `variant` are reset because they live in different namespaces
+   * across CLIs (`opencode` model ≠ `claude` model); carrying them across
+   * would just feed the new agent an unrecognized argument.
    */
   async switchAgent(
     platform: string,
@@ -221,6 +232,13 @@ class SessionManager {
       lastActivity: now,
       ttl: DEFAULT_TTL,
       messages: existing?.messages || [],
+      usage: existing?.usage,
+      activeSubtaskId: existing?.activeSubtaskId,
+      subtasks: existing?.subtasks,
+      subtaskCounter: existing?.subtaskCounter,
+      claudeSessionId: existing?.claudeSessionId,
+      claudeSessionPrimed: existing?.claudeSessionPrimed,
+      opencodeSessionId: existing?.opencodeSessionId,
     }
 
     this.sessions.set(key, session)
@@ -313,6 +331,26 @@ class SessionManager {
   }
 
   /**
+   * Persist opencode's native session id (`ses_…`) once we've seen it in the
+   * adapter's stream. Idempotent — calling with the same id is a no-op so
+   * the per-event callback can fire as many times as opencode sends events.
+   */
+  async setOpencodeSessionId(
+    platform: string, channelId: string, threadId: string,
+    opencodeSessionId: string,
+  ): Promise<Session | undefined> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session) return undefined
+    if (session.opencodeSessionId === opencodeSessionId) return session
+    session.opencodeSessionId = opencodeSessionId
+    session.lastActivity = new Date()
+    this.sessions.set(key, session)
+    await this.saveSessionMeta(key, session)
+    return session
+  }
+
+  /**
    * Increment the per-session usage roll-up after a successful agent
    * invocation. Used by router.callAgentWithHistory to power /stats.
    */
@@ -358,9 +396,11 @@ class SessionManager {
       session.messages = []
       session.lastActivity = new Date()
       session.id = `${platform}-${channelId}-${threadId}-${Date.now()}-${randomBytes(4).toString('hex')}` // New session ID
-      // Forget the old claude session — /new should give a clean slate.
+      // Forget the old per-agent CLI sessions — /new should give a clean slate
+      // for both Claude (`--resume`) and opencode (`--session`).
       delete session.claudeSessionId
       delete session.claudeSessionPrimed
+      delete session.opencodeSessionId
       // Drop any per-thread auto-allow approval rules so the new conversation
       // starts back at "ask every time".
       try { approvalBus.clearAutoAllowForThread(threadId) } catch { /* ignore */ }
@@ -579,6 +619,9 @@ class SessionManager {
         activeSubtaskId: session.activeSubtaskId,
         subtasks: session.subtasks,
         subtaskCounter: session.subtaskCounter,
+        claudeSessionId: session.claudeSessionId,
+        claudeSessionPrimed: session.claudeSessionPrimed,
+        opencodeSessionId: session.opencodeSessionId,
         messageCount: session.messages.length,
       }
       await this.atomicWrite(filePath, JSON.stringify(meta, null, 2))
@@ -620,6 +663,9 @@ class SessionManager {
         activeSubtaskId: parsed.activeSubtaskId,
         subtasks: parsed.subtasks,
         subtaskCounter: parsed.subtaskCounter,
+        claudeSessionId: parsed.claudeSessionId,
+        claudeSessionPrimed: parsed.claudeSessionPrimed,
+        opencodeSessionId: parsed.opencodeSessionId,
       }
       // Convert message timestamps from legacy format if present
       session.messages = session.messages.map((msg) => ({
