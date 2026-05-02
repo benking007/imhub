@@ -152,7 +152,11 @@ describe('ApprovalBus', () => {
     expect(bus.hasPendingFor('thread-A')).toBe(true)
 
     const resolved = bus.resolvePending('thread-A', { behavior: 'allow' })
-    expect(resolved).toBe(true)
+    expect(resolved).not.toBeNull()
+    expect(resolved?.toolName).toBe('Bash')
+    expect(resolved?.fingerprint).toBe('git p')
+    expect(resolved?.platform).toBe('feishu')
+    expect(resolved?.wasAutoAllow).toBe(false)
     expect(bus.hasPendingFor('thread-A')).toBe(false)
 
     const decision = await client.next()
@@ -353,8 +357,8 @@ describe('ApprovalBus', () => {
     await client.close()
   })
 
-  it('resolvePending returns false when no pending exists', () => {
-    expect(bus.resolvePending('nope', { behavior: 'allow' })).toBe(false)
+  it('resolvePending returns null when no pending exists', () => {
+    expect(bus.resolvePending('nope', { behavior: 'allow' })).toBeNull()
   })
 
   it('stop() denies all pending and closes socket', async () => {

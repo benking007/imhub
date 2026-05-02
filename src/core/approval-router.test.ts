@@ -269,6 +269,107 @@ describe('install / uninstall — full loop with fake messenger', () => {
     await approvalBus.stop()
   })
 
+  it('receipt: replying "all" sends a confirmation message back to the thread', async () => {
+    const path = uniqueSocketPath()
+    await approvalBus.start(path)
+    approvalBus.registerRun('run-rcpt', RUN_CTX)
+
+    const sent: Array<{ threadId: string; text: string }> = []
+    const fakeMessenger: MessengerAdapter = {
+      name: 'feishu',
+      start: async () => {},
+      stop: async () => {},
+      onMessage: () => {},
+      sendMessage: async (threadId, text) => { sent.push({ threadId, text }) },
+    }
+    install({ resolveMessenger: () => fakeMessenger })
+
+    const sock = await new Promise<Socket>((resolve, reject) => {
+      const s = createConnection(path)
+      s.once('error', reject)
+      s.once('connect', () => resolve(s))
+    })
+    sock.setEncoding('utf8')
+    sock.on('data', () => { /* don't care */ })
+
+    sock.write(JSON.stringify({
+      v: 1, type: 'approval', runId: 'run-rcpt', reqId: 'r-rcpt-1',
+      toolName: 'Bash', input: { command: 'git status -s' }, toolUseId: 'tu',
+    }) + '\n')
+
+    // Wait for approval prompt
+    for (let i = 0; i < 50 && sent.length < 1; i++) await new Promise((r) => setTimeout(r, 10))
+    expect(sent.length).toBe(1)
+    expect(sent[0].text).toContain('🔐')
+
+    // User replies "all" → receipt should be sent in addition to (silent) decision
+    const consumed = tryHandleApprovalReply('thread-A', 'all')
+    expect(consumed).toBe(true)
+    for (let i = 0; i < 50 && sent.length < 2; i++) await new Promise((r) => setTimeout(r, 10))
+    expect(sent.length).toBe(2)
+    expect(sent[1].text).toContain('已批准并启用自动放行')
+    expect(sent[1].text).toContain('Bash')
+    expect(sent[1].text).toContain('git s') // 5-char prefix
+
+    sock.end()
+    uninstall()
+    await approvalBus.stop()
+  })
+
+  it('receipt: denying during grace mode sends "已撤销自动放行规则" message', async () => {
+    const path = uniqueSocketPath()
+    // tight grace so the second request immediately enters auto-allow mode
+    const localBus = approvalBus
+    await localBus.start(path)
+    localBus.registerRun('run-rev', RUN_CTX)
+
+    const sent: Array<{ threadId: string; text: string }> = []
+    const fakeMessenger: MessengerAdapter = {
+      name: 'feishu',
+      start: async () => {},
+      stop: async () => {},
+      onMessage: () => {},
+      sendMessage: async (threadId, text) => { sent.push({ threadId, text }) },
+    }
+    install({ resolveMessenger: () => fakeMessenger })
+
+    const sock = await new Promise<Socket>((resolve, reject) => {
+      const s = createConnection(path)
+      s.once('error', reject)
+      s.once('connect', () => resolve(s))
+    })
+    sock.setEncoding('utf8')
+    sock.on('data', () => {})
+
+    // Seed the rule
+    sock.write(JSON.stringify({
+      v: 1, type: 'approval', runId: 'run-rev', reqId: 'rev-1',
+      toolName: 'Bash', input: { command: 'rm -rf /tmp/x' }, toolUseId: 'tu',
+    }) + '\n')
+    for (let i = 0; i < 50 && sent.length < 1; i++) await new Promise((r) => setTimeout(r, 10))
+    tryHandleApprovalReply('thread-A', 'all')
+    for (let i = 0; i < 50 && sent.length < 2; i++) await new Promise((r) => setTimeout(r, 10))
+    expect(sent[1].text).toContain('已批准并启用自动放行')
+
+    // Second request → should hit the rule (grace mode)
+    sock.write(JSON.stringify({
+      v: 1, type: 'approval', runId: 'run-rev', reqId: 'rev-2',
+      toolName: 'Bash', input: { command: 'rm -rf /tmp/y' }, toolUseId: 'tu2',
+    }) + '\n')
+    for (let i = 0; i < 50 && sent.length < 3; i++) await new Promise((r) => setTimeout(r, 10))
+    expect(sent[2].text).toContain('自动放行中')
+
+    // User actively denies → receipt confirms revocation
+    tryHandleApprovalReply('thread-A', 'n')
+    for (let i = 0; i < 50 && sent.length < 4; i++) await new Promise((r) => setTimeout(r, 10))
+    expect(sent[3].text).toContain('已拒绝并撤销自动放行')
+    expect(localBus.getAutoAllowKeys('thread-A')).toEqual([])
+
+    sock.end()
+    uninstall()
+    await approvalBus.stop()
+  })
+
   it('install with no messenger for platform → bus auto-denies', async () => {
     const path = uniqueSocketPath()
     await approvalBus.start(path)

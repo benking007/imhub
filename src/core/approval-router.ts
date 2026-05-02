@@ -7,7 +7,7 @@
 // 不知道 messenger 实现细节，只通过注入的 resolveMessenger 拿到 sendMessage/sendCard。
 
 import type { MessengerAdapter } from './types.js'
-import { approvalBus, type ApprovalNotification, type Decision } from './approval-bus.js'
+import { approvalBus, type ApprovalNotification, type Decision, type ResolvedInfo } from './approval-bus.js'
 import { logger as rootLogger } from './logger.js'
 
 const log = rootLogger.child({ component: 'approval-router' })
@@ -136,13 +136,20 @@ export function uninstall(): void {
  *   - If thread has pending AND text parses as decision → resolve, return true
  *   - If thread has pending AND text does NOT parse → auto-deny pending
  *     (user is moving on), return false so the message routes normally
+ *
+ * Receipt: when the resolution adds or revokes an auto-allow rule, also
+ * sends a one-line confirmation back to the IM thread so the user knows
+ * the rule landed (or got cleared). Best-effort: a missing messenger or
+ * sendMessage failure is logged and ignored — the approval itself already
+ * resolved successfully.
  */
 export function tryHandleApprovalReply(threadId: string, text: string): boolean {
   if (!approvalBus.hasPendingFor(threadId)) return false
   const decision = parseApprovalReply(text)
   if (decision) {
-    approvalBus.resolvePending(threadId, decision)
+    const info = approvalBus.resolvePending(threadId, decision)
     log.info({ event: 'approval.router.resolved', threadId, behavior: decision.behavior })
+    if (info) sendReceiptIfAny(info, decision)
     return true
   }
   // Unrecognized reply while a pending exists → treat as redirect: deny so
@@ -154,6 +161,34 @@ export function tryHandleApprovalReply(threadId: string, text: string): boolean 
   })
   log.info({ event: 'approval.router.redirected', threadId })
   return false
+}
+
+/**
+ * If the user just enabled an auto-allow rule (allow + autoAllowFurther) or
+ * just revoked one (deny while in grace mode), push a short confirmation
+ * line to the originating thread.
+ */
+function sendReceiptIfAny(info: ResolvedInfo, decision: Decision): void {
+  if (!installed) return
+  let msg: string | null = null
+  if (decision.behavior === 'allow' && decision.autoAllowFurther) {
+    msg = [
+      '✅ 已批准并启用自动放行',
+      `规则：${info.toolName} 前缀 "${info.fingerprint}" 5s 内自动放行`,
+      '撤销：本会话回 n 单条 / /approval clear 清空',
+    ].join('\n')
+  } else if (decision.behavior === 'deny' && info.wasAutoAllow) {
+    msg = `❌ 已拒绝并撤销自动放行规则：${info.toolName} "${info.fingerprint}"`
+  }
+  if (!msg) return
+  const m = installed.resolveMessenger(info.platform)
+  if (!m) {
+    log.warn({ event: 'approval.router.receipt_no_messenger', platform: info.platform })
+    return
+  }
+  m.sendMessage(info.threadId, msg).catch((err) => {
+    log.warn({ event: 'approval.router.receipt_failed', err: String(err) })
+  })
 }
 
 /** Test helper — not exported from index. */

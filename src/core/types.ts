@@ -41,6 +41,7 @@ export type ParsedMessage =
   | { type: 'think'; args: string }
   | { type: 'stats'; args: string }
   | { type: 'sessions'; args: string }
+  | { type: 'approval'; args: string }
   | { type: 'error'; prompt: string; error: string }
 
 /**

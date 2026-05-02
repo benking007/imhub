@@ -62,6 +62,23 @@ export interface ApprovalNotification {
 /** Notifier 只负责"通知 IM 推卡片/消息"。不要在这里返回决策；决策走 resolvePending。 */
 export type ApprovalNotifier = (n: ApprovalNotification) => Promise<void>
 
+/** Snapshot returned by {@link ApprovalBus.resolvePending} so the router can
+ *  send the user a confirmation receipt ("✅ 已批准并启用自动放行 …" or
+ *  "❌ 已拒绝并撤销自动放行 …") without re-scanning bus internals. */
+export interface ResolvedInfo {
+  runId: string
+  threadId: string
+  platform: string
+  toolName: string
+  /** Same fingerprint the bus uses for the auto-allow rule key. */
+  fingerprint: string
+  /** True iff the resolved pending had been created in auto-allow grace
+   *  mode — i.e. matched an existing rule. Lets the router distinguish
+   *  "user denied a normal prompt" from "user denied an auto-allow prompt
+   *  (which also revoked the rule)". */
+  wasAutoAllow: boolean
+}
+
 interface PendingApproval {
   runId: string
   reqId: string
@@ -183,7 +200,9 @@ export class ApprovalBus {
 
   /**
    * 由 messenger.onMessage 拦截层调用。把 thread 队列头部的 pending 用
-   * 给定决策 resolve 掉。返回是否真的 resolve 到了一个 pending。
+   * 给定决策 resolve 掉。返回被 resolve 的 pending 描述（platform / tool /
+   * fingerprint / 是否处于 auto-allow grace 模式）；router 用这些信息发回执。
+   * 没有 pending 时返回 null。
    *
    * Auto-allow side-effect: a user-initiated deny against a pending that
    * was running in auto-allow mode revokes the matching rule (the user is
@@ -191,15 +210,24 @@ export class ApprovalBus {
    * scoped to this user-path so sidecar disconnects / shutdown / run-
    * terminated denies don't accidentally clear rules the user still wants.
    */
-  resolvePending(threadId: string, decision: Decision): boolean {
+  resolvePending(threadId: string, decision: Decision): ResolvedInfo | null {
     const q = this.pendingByThread.get(threadId)
     const head = q?.[0]
-    if (!head) return false
+    if (!head) return null
+    const platform = this.runContexts.get(head.runId)?.platform ?? ''
+    const info: ResolvedInfo = {
+      runId: head.runId,
+      threadId: head.threadId,
+      platform,
+      toolName: head.toolName,
+      fingerprint: head.fingerprint,
+      wasAutoAllow: head.autoAllow,
+    }
     if (decision.behavior === 'deny' && head.autoAllow) {
       this.removeAutoAllowRule(head.threadId, head.toolName, head.fingerprint)
     }
     this.cancelPending(head, decision)
-    return true
+    return info
   }
 
   /** Drop every auto-allow rule registered for this thread. Called from

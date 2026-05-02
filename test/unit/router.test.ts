@@ -219,6 +219,12 @@ describe('parseMessage', () => {
       expect(parseMessage('/schedule list')).toEqual({ type: 'schedule', args: 'list' })
       expect(parseMessage('/cron list')).toEqual({ type: 'schedule', args: 'list' })
     })
+
+    it('parses /approval and /auto as aliases', () => {
+      expect(parseMessage('/approval')).toEqual({ type: 'approval', args: '' })
+      expect(parseMessage('/approval clear')).toEqual({ type: 'approval', args: 'clear' })
+      expect(parseMessage('/auto')).toEqual({ type: 'approval', args: '' })
+    })
   })
 })
 

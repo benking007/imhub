@@ -16,6 +16,7 @@ import { handleStatsCommand } from './commands/stats.js'
 import { handleSessionsCommand } from './commands/sessions.js'
 import { handleWorkspacesCommand } from './commands/workspaces.js'
 import { handleScheduleCommand } from './commands/schedule.js'
+import { handleApprovalCommand } from './commands/approval.js'
 import { logInvocation } from './audit-log.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { classifyIntent } from './intent.js'
@@ -109,6 +110,7 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'think') return { type: 'think', args: rest }
   if (cmd === 'stats' || cmd === 'usage' || cmd === 'cost') return { type: 'stats', args: rest }
   if (cmd === 'sessions') return { type: 'sessions', args: rest }
+  if (cmd === 'approval' || cmd === 'auto') return { type: 'approval', args: rest }
 
   // Check if it's an agent alias (registered agents take priority over generic commands)
   const agent = registry.findAgent(cmd)
@@ -175,6 +177,10 @@ export async function routeMessage(
 
     case 'sessions': {
       return handleSessionsCommand(parsed.args, ctx)
+    }
+
+    case 'approval': {
+      return handleApprovalCommand(parsed.args, ctx)
     }
 
     case 'agent': {
