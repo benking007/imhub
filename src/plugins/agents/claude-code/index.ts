@@ -107,7 +107,7 @@ export class ClaudeCodeAdapter extends AgentBase {
     } catch (err) {
       log.warn({ event: 'claude.approval.mkdtemp_failed', err: String(err) },
         'Falling back to dontAsk: cannot create mcp-config tmpdir')
-      return { args: this.buildArgs(prompt, opts) }
+      return { args: this.buildArgs(prompt, opts), cwd }
     }
     const configPath = join(configDir, 'mcp.json')
 

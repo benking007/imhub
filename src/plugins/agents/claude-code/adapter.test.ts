@@ -175,4 +175,25 @@ describe('ClaudeCodeAdapter prepareCommand — approval-routed', () => {
     // Should not throw on the second call
     await plan.cleanup!()
   })
+
+  // Regression for ADR 0005: every fallback return inside prepareCommand must
+  // carry cwd. An earlier version dropped it on the mkdtemp-failure branch,
+  // silently demoting that one call back to im-hub's "/" cwd and leaking
+  // memory across IM and terminal Claude.
+  it('mkdtemp failure still propagates cwd (ADR 0005)', async () => {
+    process.env.IMHUB_CLAUDE_CODE_CWD = '/tmp/imhub-cwd-regression-xyz'
+    const origTmp = process.env.TMPDIR
+    process.env.TMPDIR = '/proc/imhub-bogus-no-such-dir/xyz'
+    try {
+      const plan = await _testInternals.prepareCommand(adapter, 'hi', FULL_OPTS)
+      expect(plan.args[plan.args.indexOf('--permission-mode') + 1]).toBe('dontAsk')
+      expect(plan.args).not.toContain('--mcp-config')
+      expect(plan.cleanup).toBeUndefined()
+      expect(plan.cwd).toBe('/tmp/imhub-cwd-regression-xyz')
+    } finally {
+      if (origTmp === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = origTmp
+      delete process.env.IMHUB_CLAUDE_CODE_CWD
+    }
+  })
 })
