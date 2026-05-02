@@ -28,12 +28,13 @@
     └── memory/
 ```
 
-**两个隔离层**：
+**隔离边界（项目级隔离，用户级共享）**：
 
-| 隔离 | 含义 |
+| 层级 | 行为 |
 |---|---|
-| 与直连终端隔离 | 你在终端里跑 `claude` / `opencode` 仍读 `~/.claude/CLAUDE.md` / `~/.config/opencode/AGENTS.md`，IM 入口不读这些。 |
-| Claude vs opencode 互不可见 | Claude 只读 `claude-code/`，opencode 只读 `opencode/`。两边可分别给不同人格。 |
+| 用户级（`~/.claude/CLAUDE.md` / `~/.config/opencode/AGENTS.md`） | **IM 入口与直连终端共享。** Claude / opencode 仍会按各自惯例加载用户级配置。这里写"无论从哪进来都希望生效"的全局规则。 |
+| 项目级（`<cwd>/CLAUDE.md`、`<cwd>/AGENTS.md`、`<cwd>/memory/`） | **隔离。** IM 入口 cwd = `~/.im-hub-workspaces/<agent>/`，直连终端 cwd = 当前 shell 目录。两边互不读。这里写"只在 IM 入口想要的人格 / 项目档案"。 |
+| Claude vs opencode | 互不可见。Claude 只读 `claude-code/`，opencode 只读 `opencode/`。两边可分别给不同人格。 |
 
 ---
 
@@ -61,25 +62,23 @@
 ```
 
 **生效方式**：下一次 IM 消息进来时 Claude 启动会自动加载（Claude 内建行为，按 cwd
-查找 `CLAUDE.md`）。
+查找项目级 `CLAUDE.md`）。**用户级 `~/.claude/CLAUDE.md` 也会照常加载**，两份会一起进
+入上下文 — 把"全局都该有的规则"放用户级，"只在 IM 想要的人格"放本目录。
 
-**对终端 Claude 无影响**：`~/.claude/CLAUDE.md` 仍是你直连终端的角色书，独立维护。
+### 用户级与项目级的关系
 
-### 想让 IM Claude 也读全局角色书
+`~/.claude/CLAUDE.md` 是 Claude 的**用户级**配置，IM 入口与直连终端**都会自动加载**，
+无需任何 include 操作。本目录下的 `CLAUDE.md` 是**项目级**，IM 入口专属，与用户级
+合并到同一份上下文里。
 
-```bash
-# 方式 1：把全局当模板拷过来（一次性同步）
-cp ~/.claude/CLAUDE.md ~/.im-hub-workspaces/claude-code/CLAUDE.md
+冲突时谁优先取决于你怎么写 — Claude 不做强制覆盖，两边的规则会同时呈现给模型。
+建议：
 
-# 方式 2：在 IM 角色书里 include 全局
-cat >> ~/.im-hub-workspaces/claude-code/CLAUDE.md <<'EOF'
+- 用户级：写"无论从哪进来都希望生效"的硬性规则（中文沟通、bgjob SOP、安全约束等）
+- 项目级（本目录）：写"只在 IM 入口想要的人格 / 简洁度 / 项目档案"
 
-## 继承全局角色书
-读取 /root/.claude/CLAUDE.md 的所有规则。
-EOF
-```
-
-方式 1 立等可见但需手工同步；方式 2 让 Claude 在每次启动时主动去读那个路径。
+如果某条用户级规则不希望在 IM 入口生效，在本目录 `CLAUDE.md` 里显式写一句覆盖即可
+（例如"忽略用户级关于 X 的指引"）。
 
 ---
 

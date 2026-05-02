@@ -128,7 +128,57 @@
 | A | ✅ done | 2026-05-02 | (待 commit) | sticky 绝对锁 + 权重平衡 |
 | D | ✅ done | 2026-05-02 | (待 commit) | TTL 双层拆分 + cleanup 改造 |
 | B | ✅ done | 2026-05-02 | (待 commit) | per-Agent cwd（agent-cwd.ts 新建 + adapter 注入） |
-| C | 🟢 enabled | 2026-05-02 | — | B 落地后自动获得：CLAUDE.md / AGENTS.md / memory/ 已就绪，等用户/Agent 自行写入 |
+| C | ✅ enabled + verified | 2026-05-02 | (待 commit) | B 落地后 CLAUDE.md / AGENTS.md / memory/ 就绪；2026-05-02 修完 claudeSessionId 持久化 bug 后跨重启续接通了 |
+| Bug-fix-1 | ✅ done | 2026-05-02 | (待 commit) | claude-code adapter `prepareCommand` mkdtemp 失败分支漏注 cwd（ADR 0005 § "all 4 fallback paths"），1 行修 + 1 条回归用例 |
+| Bug-fix-2 | ✅ done | 2026-05-02 | (待 commit) | `claudeSessionId` / `claudeSessionPrimed` 三层持久化漏洞（saveSessionMeta 不写 / loadSession 不读 / switchAgent 重建丢字段），3 处修 + 2 条端到端回归用例 |
+| Feat-opencode-resume | ✅ done | 2026-05-02 | (待 commit) | opencode 长期记忆原本被误判为 CLI 限制，实际 `opencode run` 支持 `--session <id>` / `--continue`。新增 `opencodeSessionId` 持久化 + `inspectEvent` 钩子从 `step_start` 抓 sessionID + 从 `step_finish.part.{cost,tokens}` 抓成本，回写到 session.usage；router 注入闭包绑定的 `onAgentSessionId` / `onUsage` 回调 |
+
+---
+
+## Retro · 2026-05-02 落地后即时复盘
+
+### 触发
+
+A/D/B 落地当天 commit 前做"继续 CR"二轮审查，针对 Phase B 的 cwd 注入与 Phase D 承诺的"`claudeSessionId` 7d 内不丢"做穿透验证。
+
+### 发现的 bug
+
+**Bug-1：`claude-code/index.ts:110` mkdtemp 失败分支漏 cwd**
+
+ADR 0005 § "Why all 4 fallback paths must carry cwd" 自己点名警告过的事，落地时还是漏了一条降级路径。`prepareCommand` 共 6 个 return，其中 1 条没传 `cwd`。罕见路径触发即静默退回 `/`，直接撕开 cwd 隔离。
+
+**Bug-2：`claudeSessionId` / `claudeSessionPrimed` 三层都没在落盘**
+
+| 位置 | 漏洞 |
+|---|---|
+| `saveSessionMeta` | meta 字面量缺这两个字段 → 内存改了，磁盘不写 |
+| `loadSession` | parsed 解构缺这两个字段 → 即使磁盘有也读不回 |
+| `switchAgent` | 重建 Session 时只手抄 8 个字段 → `usage` / `claudeSessionId` / `claudeSessionPrimed` / `subtasks` / `activeSubtaskId` / `subtaskCounter` 一律丢 |
+
+TS `Omit<Session, 'messages'>` 只在结构上要求字段类型，optional 字段缺失编译期不报错。
+
+实证：升级前积累的 296 个 session.json 文件 zero 个含 `claudeSessionId`。意味着 Phase D 文档里"7d 内 `claude --resume` 能续上 jsonl"**从落地起就没真正生效**。
+
+### 修复策略
+
+- saveSessionMeta + loadSession：补字段（4 行）
+- switchAgent：选择性 carry-over —— 保留 `usage` / `subtasks*` / `claudeSessionId` / `claudeSessionPrimed`；故意不带 `model` / `variant`（不同 CLI 模型命名空间不同）
+- 加测试：`claudeSessionId` 持久化往返；`switchAgent` 跨切保留
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| `bun test` 全套 | 599 → 601 pass（+2 新增），10 fail 与 baseline 一致 |
+| `npm run typecheck` | 干净 |
+| 端到端真机测试：`/cc` 两轮 + `/oc` 两轮 | session.json `claudeSessionId=4f392b46-…` 全程保留；`~/.claude/projects/-root--im-hub-workspaces-claude-code/4f392b46-….jsonl` 同 UUID 落地；`usage.turns` 跨 agent 切换从 6 → 8 → 10 正确累加 |
+
+### 教训
+
+1. **TS Optional 字段是结构化校验的盲区**：`Omit<T, K>` 不能保证字段被实际写入。需要单元测试盖到"字段进 → 字段出"的端到端往返，不能只靠类型。
+2. **审计日志比内存断言更可信**：跨重启验证时，靠 `audit.db` 反推真实事件链 + 磁盘文件 mtime 比看在线日志靠谱。
+3. **第一次假阴性来自用户行为**：用户用 `/new` 清掉了刚分配的 UUID，被我误判为"修复没生效"。教训：解读"症状一致"的数据时，先穷举可能造成同样症状的用户路径，再下结论。
+4. **Phase B 的 ADR 自己警示过的坑还是踩了**：以后类似"所有 N 条降级路径都必须做 X"的约束，加一个 lint / 集中点（switch case + exhaustiveness check）比靠人记可靠。
 
 ---
 
@@ -139,9 +189,15 @@
 1. 先读本文件 `docs/im-gateway-v2-plan.md`
 2. 读 `docs/adr/0004-sticky-agent-and-split-ttl.md` 了解 A+D 的决定
 3. 读 `docs/architecture/agent-cwd-and-memory.md` 了解 B+C 的方案
-4. 看 `git log --oneline -20 src/core/intent.ts src/core/session.ts` 确认 A+D 的提交是否还在
-5. 看 `systemctl status im-hub` 确认服务是否已经在用新 dist
-6. 接 Phase B 直接动手改三处文件；不要重头分析
+4. 读 `docs/session-model.md` 了解三层 session 的关系
+5. 看 `git log --oneline -20 src/core/intent.ts src/core/session.ts` 确认 A+D 的提交是否还在
+6. 看 `systemctl status im-hub` 确认服务是否已经在用新 dist
+7. 验证健康度的一行体检：
+   ```bash
+   jq '{agent, cId: .claudeSessionId, primed: .claudeSessionPrimed, turns: .usage.turns}' \
+     ~/.im-hub/sessions/<your-thread-key>.json
+   ```
+   `cId` 不为 null 即说明 v2 全链路通。
 
 ---
 
