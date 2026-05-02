@@ -19,7 +19,12 @@ const PROFILES: Record<string, AgentProfile> = {
       'test', '测试', 'api', 'server', '后端', 'frontend', '前端', 'sql', '数据库', 'database',
       'python', 'typescript', 'javascript', 'rust', 'go', 'java',
       'shell', 'bash', '命令行', 'terminal', 'config', '配置', 'docker', 'container'],
-    weight: 1.2,  // prefer opencode for coding tasks
+    // Was 1.2 — same keywords also match claude-code, so the 0.2 advantage
+    // would push routing to opencode whenever the message mentioned any coding
+    // term. With sticky now an absolute lock (see classifyIntent below) this
+    // weight only matters for the very first message on a fresh thread, but we
+    // keep weights neutral so ordering comes from topic rules + defaultAgent.
+    weight: 1.0,
   },
   'claude-code': {
     keywords: ['代码', 'code', '编程', 'refactor', '分析', 'analyze', 'architecture', '架构',
@@ -96,6 +101,22 @@ export function classifyIntent(
   const available = registry.listAgents().filter(a => !circuitBreaker.isOpen(a))
   if (available.length === 0) {
     throw new Error('No agents available')
+  }
+
+  // Sticky is an absolute lock: once a thread is bound to an agent, only an
+  // explicit /<agent> command (or /new) can change it. Without this, a single
+  // keyword in a long-running thread could outscore the sticky bonus and
+  // silently swap agents — the "agent drift" symptom users hit after long
+  // pauses or across days. See router.ts:default → classifyIntent caller.
+  if (stickyAgent && available.includes(stickyAgent)) {
+    logger?.debug({ event: 'intent.sticky_lock', agent: stickyAgent },
+      `[intent] sticky lock honored (no classification)`)
+    return {
+      agent: stickyAgent,
+      score: 0,
+      reason: 'sticky lock (no classification)',
+      triggeredBy: 'sticky',
+    }
   }
 
   // Score per agent. Agents missing from PROFILES (e.g. user-installed
