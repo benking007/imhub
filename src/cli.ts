@@ -426,11 +426,10 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
     }
 
     if (willInvokeAgent && messenger.sendThinking) {
-      const idForUser = routeCtx.agentSessionId || traceId
       try {
         dismissThinking = await messenger.sendThinking(
           message.threadId,
-          `🤔 思考中…\n(${idForUser})`,
+          '🤔 思考中…',
         )
       } catch (err) {
         logger.debug({ err: String(err) }, 'sendThinking failed')
