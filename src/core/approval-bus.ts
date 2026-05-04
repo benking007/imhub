@@ -86,7 +86,16 @@ interface PendingApproval {
   threadId: string
   /** Truncated input fingerprint used for auto-allow lookups + revocation. */
   fingerprint: string
-  socket: Socket
+  /** Set when the pending was created from a unix-socket sidecar (Claude
+   *  path). cancelPending writes the decision back over this socket. Either
+   *  `socket` or `dispatch` must be set, never both. */
+  socket?: Socket
+  /** Set when the pending was created via {@link ApprovalBus.registerSyntheticPending}
+   *  (opencode HTTP path, P2). cancelPending invokes this callback instead
+   *  of writing to a socket — the caller is responsible for delivering the
+   *  decision to its own backend (e.g. POST /permission/:id/reply). Errors
+   *  thrown from dispatch are logged, never propagated. */
+  dispatch?: (decision: Decision) => void
   timer: ReturnType<typeof setTimeout>
   resolved: boolean
   /** When true, this pending was created in auto-allow mode: timer expiry
@@ -196,6 +205,15 @@ export class ApprovalBus {
 
   hasPendingFor(threadId: string): boolean {
     return (this.pendingByThread.get(threadId)?.length ?? 0) > 0
+  }
+
+  /** True iff a notifier has been installed (i.e. messenger layer has wired
+   *  the bus into IM). Callers that have a fallback path (e.g. the opencode
+   *  HTTP adapter) check this before registerSyntheticPending so they can
+   *  short-circuit when the bus is dormant — mostly relevant in tests and in
+   *  non-IM call paths (web, scheduler). */
+  hasNotifier(): boolean {
+    return this.notifier !== null
   }
 
   /**
@@ -334,34 +352,114 @@ export class ApprovalBus {
       this.sendDecision(socket, reqId, { behavior: 'deny', message: `unknown runId: ${runId}` })
       return
     }
-    if (!this.notifier) {
-      this.sendDecision(socket, reqId, { behavior: 'deny', message: 'no notifier installed' })
-      return
-    }
     if (this.pendingById.has(reqId)) {
       // 重复 reqId（sidecar bug）：拒绝新的，老的留着
       this.sendDecision(socket, reqId, { behavior: 'deny', message: 'duplicate reqId' })
       return
     }
+    if (!this.notifier) {
+      this.sendDecision(socket, reqId, { behavior: 'deny', message: 'no notifier installed' })
+      return
+    }
 
-    const fingerprint = inputFingerprint(input)
-    const ruleKey = autoAllowRuleKey(toolName, fingerprint)
-    const isAutoAllow = this.autoAllowByThread.get(ctx.threadId)?.has(ruleKey) ?? false
+    await this._registerPending({
+      runId, reqId, toolName, toolUseId, input, ctx,
+      transport: { socket },
+    })
+  }
+
+  /**
+   * Register an approval request that did NOT come from the unix-socket
+   * sidecar. Used by the opencode HTTP bridge (P2): SSE event from opencode
+   * → bridge calls this with a `dispatch` callback that POSTs the decision
+   * back to opencode's REST API.
+   *
+   * Behavior is identical to the socket path — same notifier, same timeout,
+   * same auto-allow rules — just the delivery channel differs. The
+   * `dispatch` is invoked with the final Decision exactly once, on:
+   *   - user reply via {@link resolvePending}
+   *   - timeout (deny in normal mode, allow in auto-allow mode)
+   *   - {@link unregisterRun} (deny: "run terminated")
+   *   - {@link stop} (deny: "approval-bus shutting down")
+   *
+   * dispatch errors are logged and swallowed — the bus must not crash on
+   * a misbehaving callback.
+   *
+   * Idempotent on duplicate reqId: returns silently without firing notify
+   * (matches the socket path's "duplicate reqId" handling, minus the wire
+   * deny since the synthetic caller has no socket to deny on).
+   *
+   * Throws synchronously only when the caller's bus state is invalid (no
+   * notifier installed). The caller should avoid registering the synthetic
+   * pending in that case and fall back to its own deny path.
+   */
+  async registerSyntheticPending(input: {
+    runId: string
+    reqId: string
+    toolName: string
+    input: Record<string, unknown>
+    /** Optional — used by Claude's MCP path; defaults to '' for synthetic. */
+    toolUseId?: string
+    ctx: RunContext
+    dispatch: (decision: Decision) => void
+  }): Promise<void> {
+    if (!this.notifier) {
+      // Caller is responsible for handling this case — they have the only
+      // backchannel to whatever spawned the request (opencode HTTP, etc.).
+      throw new Error('no notifier installed')
+    }
+    if (this.pendingById.has(input.reqId)) {
+      log.warn({ event: 'approval.bus.duplicate_reqId', reqId: input.reqId, source: 'synthetic' })
+      return
+    }
+    // Register run context lazily so callers don't have to pre-call
+    // registerRun for every prompt — synthetic pendings already carry full
+    // ctx in their argument.
+    if (!this.runContexts.has(input.runId)) {
+      this.runContexts.set(input.runId, input.ctx)
+    }
+    await this._registerPending({
+      runId: input.runId,
+      reqId: input.reqId,
+      toolName: input.toolName,
+      toolUseId: input.toolUseId ?? '',
+      input: input.input,
+      ctx: input.ctx,
+      transport: { dispatch: input.dispatch },
+    })
+  }
+
+  /**
+   * Shared register-and-notify pipeline used by both the socket path and the
+   * synthetic path. Builds the PendingApproval, wires the timer, fires the
+   * notifier, and ensures the timer is cleared if the notifier itself throws.
+   */
+  private async _registerPending(args: {
+    runId: string
+    reqId: string
+    toolName: string
+    toolUseId: string
+    input: Record<string, unknown>
+    ctx: RunContext
+    transport: { socket: Socket } | { dispatch: (decision: Decision) => void }
+  }): Promise<void> {
+    const fingerprint = inputFingerprint(args.input)
+    const ruleKey = autoAllowRuleKey(args.toolName, fingerprint)
+    const isAutoAllow = this.autoAllowByThread.get(args.ctx.threadId)?.has(ruleKey) ?? false
     const timeoutMs = isAutoAllow ? this.autoAllowGraceMs : this.approvalTimeoutMs
 
+    const transport = args.transport
     const pending: PendingApproval = {
-      runId,
-      reqId,
-      toolName,
-      threadId: ctx.threadId,
+      runId: args.runId,
+      reqId: args.reqId,
+      toolName: args.toolName,
+      threadId: args.ctx.threadId,
       fingerprint,
-      socket,
+      socket: 'socket' in transport ? transport.socket : undefined,
+      dispatch: 'dispatch' in transport ? transport.dispatch : undefined,
       resolved: false,
       autoAllow: isAutoAllow,
       timer: setTimeout(() => {
-        // In auto-allow mode the timer is the *grace* timer — expiry means
-        // "user didn't object in time, proceed". In normal mode it's the
-        // hard-deny timeout.
         if (isAutoAllow) {
           this.cancelPending(pending, { behavior: 'allow' })
         } else {
@@ -369,20 +467,26 @@ export class ApprovalBus {
         }
       }, timeoutMs),
     }
-    this.pendingById.set(reqId, pending)
-    const q = this.pendingByThread.get(ctx.threadId) ?? []
+    this.pendingById.set(args.reqId, pending)
+    const q = this.pendingByThread.get(args.ctx.threadId) ?? []
     q.push(pending)
-    this.pendingByThread.set(ctx.threadId, q)
+    this.pendingByThread.set(args.ctx.threadId, q)
 
-    log.info({ event: 'approval.bus.request', runId, reqId, toolName, threadId: ctx.threadId, autoAllow: isAutoAllow })
+    log.info({
+      event: 'approval.bus.request',
+      runId: args.runId, reqId: args.reqId, toolName: args.toolName,
+      threadId: args.ctx.threadId, autoAllow: isAutoAllow,
+      transport: 'socket' in transport ? 'socket' : 'synthetic',
+    })
 
     try {
-      await this.notifier({
-        runId, reqId, toolName, input, toolUseId, ctx,
+      await this.notifier!({
+        runId: args.runId, reqId: args.reqId, toolName: args.toolName,
+        input: args.input, toolUseId: args.toolUseId, ctx: args.ctx,
         ...(isAutoAllow ? { autoAllow: { graceMs: this.autoAllowGraceMs } } : {}),
       })
     } catch (err) {
-      log.error({ event: 'approval.bus.notifier_error', reqId, err: String(err) })
+      log.error({ event: 'approval.bus.notifier_error', reqId: args.reqId, err: String(err) })
       this.cancelPending(pending, { behavior: 'deny', message: 'notifier error' })
     }
   }
@@ -401,7 +505,19 @@ export class ApprovalBus {
       this.addAutoAllowRule(p.threadId, p.toolName, p.fingerprint)
     }
 
-    this.sendDecision(p.socket, p.reqId, decision)
+    if (p.dispatch) {
+      // Synthetic path (opencode HTTP bridge). Caller owns the wire — they
+      // translate Decision → their backend's reply schema. Errors thrown
+      // here are isolated; the bus just logs.
+      try {
+        p.dispatch(decision)
+      } catch (err) {
+        log.warn({ event: 'approval.bus.dispatch_error', reqId: p.reqId, err: String(err) })
+      }
+    } else if (p.socket) {
+      this.sendDecision(p.socket, p.reqId, decision)
+    }
+    // (Neither set is impossible — _registerPending guarantees one of the two.)
     this.removePending(p)
   }
 
