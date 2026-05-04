@@ -422,6 +422,20 @@ async function handleMessage(ctx: MessageContext, defaultAgent: string): Promise
         await sessionManager.getOrCreateSession(
           platform, ctx.channelId, message.threadId, agentForRun,
         )
+      } else if (agentForRun === 'codex') {
+        // codex generates its own thread id (UUID) on first run; we capture
+        // it from `thread.started` in the JSON stream. If we already have
+        // one, hand it back so codex spawns `exec resume <id>` and continues
+        // from ~/.codex/sessions; router clears history under
+        // agentSessionResume so we don't double-feed prior turns.
+        const cxId = stickySession?.codexSessionId
+        if (cxId) {
+          routeCtx.agentSessionId = cxId
+          routeCtx.agentSessionResume = true
+        }
+        await sessionManager.getOrCreateSession(
+          platform, ctx.channelId, message.threadId, agentForRun,
+        )
       }
     }
 

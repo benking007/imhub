@@ -39,8 +39,8 @@ describe('resolveRoots', () => {
   it('returns defaults when env unset', () => {
     delete process.env.IMHUB_BGJOB_ROOTS
     const roots = resolveRoots()
-    expect(roots.length).toBe(2)
-    expect(roots.map((r) => r.id).sort()).toEqual(['claude', 'opencode'])
+    expect(roots.length).toBe(3)
+    expect(roots.map((r) => r.id).sort()).toEqual(['claude', 'codex', 'opencode'])
   })
 
   it('parses comma-separated absolute paths from env, with id= prefix', () => {
@@ -53,7 +53,7 @@ describe('resolveRoots', () => {
   it('falls back to default when env contains no valid entries', () => {
     process.env.IMHUB_BGJOB_ROOTS = 'relative/path'
     const roots = resolveRoots()
-    expect(roots.length).toBe(2) // back to defaults
+    expect(roots.length).toBe(3) // back to defaults
   })
 
   it('uses basename as id when no id= prefix', () => {

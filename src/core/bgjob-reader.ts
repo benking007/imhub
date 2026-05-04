@@ -54,8 +54,9 @@ export interface BgjobDetail extends BgjobSummary {
 }
 
 const DEFAULT_ROOTS: BgjobRoot[] = [
-  { id: 'claude',   path: join(homedir(), '.claude', 'bgjobs'),         label: 'Claude Code' },
+  { id: 'claude',   path: join(homedir(), '.claude', 'bgjobs'),             label: 'Claude Code' },
   { id: 'opencode', path: join(homedir(), '.config', 'opencode', 'bgjobs'), label: 'opencode' },
+  { id: 'codex',    path: join(homedir(), '.codex', 'bgjobs'),              label: 'Codex' },
 ]
 
 /**

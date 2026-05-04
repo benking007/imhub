@@ -126,7 +126,7 @@ export async function startWebServer(options: {
       return handleCreateJob(req, res)
     }
 
-    // bgjobs (read-only view of ~/.claude/bgjobs and ~/.config/opencode/bgjobs)
+    // bgjobs (read-only view of ~/.claude/bgjobs, ~/.config/opencode/bgjobs, ~/.codex/bgjobs)
     if (url.pathname === '/api/bgjobs' && req.method === 'GET') {
       return handleListBgjobs(req, res, url)
     }

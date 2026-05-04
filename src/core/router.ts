@@ -389,10 +389,18 @@ export async function callAgentWithHistory(
   // race each other.
   let usageAcc = 0
   const onAgentSessionId = (id: string): void => {
-    // opencode's sessionID. Persist on first sighting so the next turn can
-    // pass --session <id>. setOpencodeSessionId is idempotent.
-    void sessionManager.setOpencodeSessionId(ctx.platform, ctx.channelId, ctx.threadId, id)
-      .catch((err) => ctx.logger.debug({ err: String(err) }, 'setOpencodeSessionId failed'))
+    // Persist the adapter-reported id on first sighting so the next turn can
+    // pass it back via --session / exec resume. Setters are idempotent.
+    // Routed by agent name so each adapter writes to its own session column.
+    const name = agent!.name
+    if (name === 'opencode') {
+      void sessionManager.setOpencodeSessionId(ctx.platform, ctx.channelId, ctx.threadId, id)
+        .catch((err) => ctx.logger.debug({ err: String(err) }, 'setOpencodeSessionId failed'))
+    } else if (name === 'codex') {
+      void sessionManager.setCodexSessionId(ctx.platform, ctx.channelId, ctx.threadId, id)
+        .catch((err) => ctx.logger.debug({ err: String(err) }, 'setCodexSessionId failed'))
+    }
+    // claude-code pre-allocates its own UUID in cli.ts, never calls back here.
   }
   const onUsage = (delta: { costUsd?: number; tokensInput?: number; tokensOutput?: number }): void => {
     if (typeof delta.costUsd === 'number' && Number.isFinite(delta.costUsd)) usageAcc += delta.costUsd

@@ -99,6 +99,11 @@ export interface Session {
    *  resumes the same conversation from its own DB and im-hub no longer needs
    *  to stitch the history into the prompt. Cleared by /new. */
   opencodeSessionId?: string
+  /** codex thread id (UUID) discovered from codex's `thread.started` event on
+   *  a fresh run. Subsequent turns spawn `codex exec resume <id> …` so codex
+   *  continues the same session from its own ~/.codex/sessions store. Cleared
+   *  by /new. */
+  codexSessionId?: string
   /** Plan mode flag — toggled by /plan on / /plan off. When true:
    *    • claude-code adapter spawns with `--permission-mode plan` and bypasses
    *      the IM approval bus (plan mode is read-only, no mutations to gate).

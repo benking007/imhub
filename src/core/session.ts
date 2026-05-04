@@ -239,6 +239,7 @@ class SessionManager {
       claudeSessionId: existing?.claudeSessionId,
       claudeSessionPrimed: existing?.claudeSessionPrimed,
       opencodeSessionId: existing?.opencodeSessionId,
+      codexSessionId: existing?.codexSessionId,
       planMode: existing?.planMode,
     }
 
@@ -359,6 +360,26 @@ class SessionManager {
   }
 
   /**
+   * Persist codex's native thread id (UUID) once we've seen it in the
+   * adapter's `thread.started` event. Idempotent — same id may fire multiple
+   * times per spawn. Mirrors setOpencodeSessionId.
+   */
+  async setCodexSessionId(
+    platform: string, channelId: string, threadId: string,
+    codexSessionId: string,
+  ): Promise<Session | undefined> {
+    const key = `${platform}:${channelId}:${threadId}`
+    const session = this.sessions.get(key) || await this.loadSession(key)
+    if (!session) return undefined
+    if (session.codexSessionId === codexSessionId) return session
+    session.codexSessionId = codexSessionId
+    session.lastActivity = new Date()
+    this.sessions.set(key, session)
+    await this.saveSessionMeta(key, session)
+    return session
+  }
+
+  /**
    * Increment the per-session usage roll-up after a successful agent
    * invocation. Used by router.callAgentWithHistory to power /stats.
    */
@@ -409,6 +430,7 @@ class SessionManager {
       delete session.claudeSessionId
       delete session.claudeSessionPrimed
       delete session.opencodeSessionId
+      delete session.codexSessionId
       // Plan mode is per-conversation intent ("先规划再动手") — a fresh
       // conversation always starts at "off" so users don't get a surprising
       // read-only run after /new.
@@ -634,6 +656,7 @@ class SessionManager {
         claudeSessionId: session.claudeSessionId,
         claudeSessionPrimed: session.claudeSessionPrimed,
         opencodeSessionId: session.opencodeSessionId,
+        codexSessionId: session.codexSessionId,
         planMode: session.planMode,
         messageCount: session.messages.length,
       }
@@ -679,6 +702,7 @@ class SessionManager {
         claudeSessionId: parsed.claudeSessionId,
         claudeSessionPrimed: parsed.claudeSessionPrimed,
         opencodeSessionId: parsed.opencodeSessionId,
+        codexSessionId: parsed.codexSessionId,
         planMode: parsed.planMode,
       }
       // Convert message timestamps from legacy format if present
