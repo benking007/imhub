@@ -357,7 +357,7 @@ The schema is enforced by `zod` at startup and on every PUT `/api/config` — ba
 ## Development
 
 ```bash
-git clone https://github.com/ceociocto/im-hub
+git clone https://github.com/benking007/imhub.git
 cd im-hub
 npm install
 npm run build      # tsc + copy public/
@@ -427,7 +427,8 @@ Questions? Feel free to reach out on [X](https://x.com/lijieisme) or join the Di
 </p>
 
 <p align="center">
-  <img src="assets/wechat-group" alt="WeChat Group" width="180">
+  <img src="assets/wechat-group" alt="Original author WeChat" width="180"><br>
+  <sub><i>Original author's contact</i></sub>
 </p>
 
 ## License

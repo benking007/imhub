@@ -356,7 +356,7 @@ im-hub/
 ## 开发
 
 ```bash
-git clone https://github.com/ceociocto/im-hub
+git clone https://github.com/benking007/imhub.git
 cd im-hub
 npm install
 npm run build      # tsc + 拷贝 public/
@@ -426,7 +426,8 @@ npm start
 </p>
 
 <p align="center">
-  <img src="assets/wechat-group" alt="微信群" width="180">
+  <img src="assets/wechat-group" alt="原作者微信" width="180"><br>
+  <sub><i>原作者联系方式</i></sub>
 </p>
 
 ## 许可证
