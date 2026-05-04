@@ -22,10 +22,14 @@
 │   ├── memory/
 │   │   └── MEMORY.md      ← Claude auto-memory（Claude 自动写）
 │   └── （Claude 会读 cwd 下任何相对路径文件）
-└── opencode/
-    ├── AGENTS.md          ← IM 入口的 opencode 角色定义
+├── opencode/
+│   ├── AGENTS.md          ← IM 入口的 opencode 角色定义
+│   ├── PROJECT.md         ← （建议）你写的长期项目档案
+│   └── memory/
+└── codex/
+    ├── AGENTS.md          ← IM 入口的 Codex 角色定义（与 opencode 同名但目录隔离）
     ├── PROJECT.md         ← （建议）你写的长期项目档案
-    └── memory/
+    └── memory/            ← 手写笔记目录（codex 无 auto-memory）
 ```
 
 **隔离边界（项目级隔离，用户级共享）**：
@@ -34,7 +38,7 @@
 |---|---|
 | 用户级（`~/.claude/CLAUDE.md` / `~/.config/opencode/AGENTS.md`） | **IM 入口与直连终端共享。** Claude / opencode 仍会按各自惯例加载用户级配置。这里写"无论从哪进来都希望生效"的全局规则。 |
 | 项目级（`<cwd>/CLAUDE.md`、`<cwd>/AGENTS.md`、`<cwd>/memory/`） | **隔离。** IM 入口 cwd = `~/.im-hub-workspaces/<agent>/`，直连终端 cwd = 当前 shell 目录。两边互不读。这里写"只在 IM 入口想要的人格 / 项目档案"。 |
-| Claude vs opencode | 互不可见。Claude 只读 `claude-code/`，opencode 只读 `opencode/`。两边可分别给不同人格。 |
+| Claude vs opencode vs codex | 互不可见。Claude 只读 `claude-code/`，opencode 只读 `opencode/`，codex 只读 `codex/`。三边可分别给不同人格。`AGENTS.md` 在 opencode/codex 目录里同名但因 cwd 隔离，互不读取。 |
 
 ---
 
@@ -89,6 +93,33 @@ vim ~/.im-hub-workspaces/opencode/AGENTS.md
 ```
 
 opencode 启动时会读 cwd 下的 `AGENTS.md`，行为与 Claude 类似。
+
+---
+
+## 三·B、给 IM 入口的 Codex 写"角色书"
+
+```bash
+vim ~/.im-hub-workspaces/codex/AGENTS.md
+```
+
+Codex 启动时同样会读 cwd 下的 `AGENTS.md`。**与 opencode 同名但目录分离**：im-hub
+spawn codex 时把 cwd 钉在 `~/.im-hub-workspaces/codex/`，所以它只读这个目录下的
+`AGENTS.md`，永远不会撞到 opencode 的那一份。
+
+Codex 会话连续性的关键事实：
+- im-hub 监听 `thread.started` 事件捕获 codex 自生成的 thread UUID，存到
+  `Session.codexSessionId`。
+- 后续每轮 spawn `codex exec resume <uuid> …`，codex 从 `~/.codex/sessions/`
+  读出完整历史，**im-hub 不再把消息历史拼进 prompt**。
+- `/new` 会清掉 `codexSessionId`，下一轮起新 codex thread。
+
+记忆框架：codex 没有 Claude 那种 auto-memory，也没有 opencode 的 PROJECT.md
+内建约定。本目录下的 `memory/` 目录留作手写笔记起点 —— 在 AGENTS.md 里指引
+codex 启动时读取即可：
+
+```markdown
+启动时先读 ./memory/*.md 与 ./PROJECT.md 了解长期上下文。
+```
 
 ---
 
@@ -302,8 +333,11 @@ mkdir -p ~/.im-hub-workspaces/claude-code/memory/   # 不存在就建
 |---|---|
 | 写 IM Claude 角色书 | `~/.im-hub-workspaces/claude-code/CLAUDE.md` |
 | 写 IM opencode 角色书 | `~/.im-hub-workspaces/opencode/AGENTS.md` |
+| 写 IM Codex 角色书 | `~/.im-hub-workspaces/codex/AGENTS.md` |
 | 看 Claude auto-memory | `~/.im-hub-workspaces/claude-code/memory/MEMORY.md` |
 | 看 IM Claude jsonl 历史 | `~/.claude/projects/-root-im-hub-workspaces-claude-code/*.jsonl` |
+| 看 IM Codex 会话历史 | `~/.codex/sessions/YYYY/MM/DD/*` |
+| Codex bgjob 工作目录 | `~/.codex/bgjobs/`（独立 wrapper：`/root/.codex/scripts/bgjob`） |
 | 看 im-hub session 状态 | `~/.im-hub/sessions/*.json` |
 | 看 im-hub 审计日志 | `sqlite3 ~/.im-hub/audit.db` |
 | 看 im-hub 服务日志 | `journalctl -u im-hub -f` |
