@@ -64,6 +64,24 @@ describe('ClaudeCodeAdapter prepareCommand — fallback paths', () => {
     expect(plan.args[plan.args.indexOf('--permission-mode') + 1]).toBe('dontAsk')
     expect(plan.cleanup).toBeUndefined()
   })
+
+  it('uses --permission-mode plan + skips mcp-config when planMode=true', async () => {
+    // planMode short-circuits the approval-bus pipeline regardless of IM
+    // context — plan is read-only so there is nothing for the bus to gate.
+    const plan = await _testInternals.prepareCommand(adapter, 'sketch', { ...FULL_OPTS, planMode: true })
+    expect(plan.args[plan.args.indexOf('--permission-mode') + 1]).toBe('plan')
+    expect(plan.args).not.toContain('--mcp-config')
+    expect(plan.args).not.toContain('--permission-prompt-tool')
+    expect(plan.cleanup).toBeUndefined()
+    expect(plan.args[plan.args.length - 1]).toBe('sketch')
+  })
+
+  it('buildArgs uses plan when planMode is set, dontAsk otherwise', () => {
+    const plain = _testInternals.buildArgs(adapter, 'p', {})
+    expect(plain[plain.indexOf('--permission-mode') + 1]).toBe('dontAsk')
+    const planning = _testInternals.buildArgs(adapter, 'p', { planMode: true })
+    expect(planning[planning.indexOf('--permission-mode') + 1]).toBe('plan')
+  })
 })
 
 describe('ClaudeCodeAdapter prepareCommand — approval-routed', () => {

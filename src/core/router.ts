@@ -17,6 +17,7 @@ import { handleSessionsCommand } from './commands/sessions.js'
 import { handleWorkspacesCommand } from './commands/workspaces.js'
 import { handleScheduleCommand } from './commands/schedule.js'
 import { handleApprovalCommand } from './commands/approval.js'
+import { handlePlanCommand } from './commands/plan.js'
 import { logInvocation } from './audit-log.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { classifyIntent } from './intent.js'
@@ -111,6 +112,10 @@ export function parseMessage(text: string): ParsedMessage {
   if (cmd === 'stats' || cmd === 'usage' || cmd === 'cost') return { type: 'stats', args: rest }
   if (cmd === 'sessions') return { type: 'sessions', args: rest }
   if (cmd === 'approval' || cmd === 'auto') return { type: 'approval', args: rest }
+  if (cmd === 'plan') return { type: 'plan', args: rest }
+  // Convenience aliases that map to /plan on|off without typing the subcommand.
+  if (cmd === 'plan-on' || cmd === 'planon') return { type: 'plan', args: 'on' }
+  if (cmd === 'plan-off' || cmd === 'planoff') return { type: 'plan', args: 'off' }
 
   // Check if it's an agent alias (registered agents take priority over generic commands)
   const agent = registry.findAgent(cmd)
@@ -183,6 +188,10 @@ export async function routeMessage(
       return handleApprovalCommand(parsed.args, ctx)
     }
 
+    case 'plan': {
+      return handlePlanCommand(parsed.args, ctx)
+    }
+
     case 'agent': {
       const agent = registry.findAgent(parsed.agent)
       if (!agent) {
@@ -225,7 +234,7 @@ export async function routeMessage(
         ctx.platform, ctx.channelId, ctx.threadId, agent.name
       )
       ctx.intent = 'explicit'
-      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx, session.model, session.variant)
+      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx, session.model, session.variant, session.planMode)
     }
 
     case 'error': {
@@ -267,7 +276,7 @@ export async function routeMessage(
         await sessionManager.addMessage(ctx.platform, ctx.channelId, `${ctx.threadId}:sub:${tid}`, {
           role: 'user', content: parsed.prompt, timestamp: new Date()
         })
-        return callAgentWithHistory(tAgent, subSession.id, parsed.prompt, subSession.messages, ctx, subSession.model, subSession.variant)
+        return callAgentWithHistory(tAgent, subSession.id, parsed.prompt, subSession.messages, ctx, subSession.model, subSession.variant, subSession.planMode)
       }
 
       // Use intent classifier to pick best agent
@@ -341,7 +350,7 @@ export async function routeMessage(
       const session = await sessionManager.getOrCreateSession(
         ctx.platform, ctx.channelId, ctx.threadId, agentName
       )
-      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx, session.model, session.variant)
+      return callAgentWithHistory(agent, session.id, parsed.prompt, session.messages, ctx, session.model, session.variant, session.planMode)
     }
   }
 }
@@ -357,7 +366,8 @@ export async function callAgentWithHistory(
   history: ChatMessage[],
   ctx: RouteContext,
   model?: string,
-  variant?: string
+  variant?: string,
+  planMode?: boolean
 ): Promise<AsyncGenerator<string>> {
   await sessionManager.addMessage(ctx.platform, ctx.channelId, ctx.threadId, {
     role: 'user',
@@ -388,6 +398,11 @@ export async function callAgentWithHistory(
     if (typeof delta.costUsd === 'number' && Number.isFinite(delta.costUsd)) usageAcc += delta.costUsd
   }
 
+  // Plan mode kill-switch: ops can flip IMHUB_DISABLE_PLAN_MODE=1 to ignore
+  // every session's planMode flag without redeploying. Matches the same env
+  // var that short-circuits the /plan command itself.
+  const effectivePlanMode = planMode === true && process.env.IMHUB_DISABLE_PLAN_MODE !== '1'
+
   const generator = agent!.sendPrompt(sessionId, prompt, effectiveHistory, {
     model,
     variant,
@@ -399,6 +414,7 @@ export async function callAgentWithHistory(
     agentSessionResume: ctx.agentSessionResume,
     onAgentSessionId,
     onUsage,
+    planMode: effectivePlanMode || undefined,
   })
 
   return (async function* (): AsyncGenerator<string> {

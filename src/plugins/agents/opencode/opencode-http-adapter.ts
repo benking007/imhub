@@ -217,6 +217,14 @@ export class OpenCodeHttpAdapter extends OpenCodeAdapter {
       // Newly-created sessions already received the ruleset in createSession's
       // POST body — no need to PATCH again. Mark applied so we skip the dup.
       this.rulesetApplied.add(sessionID)
+    } else if (callOpts.planMode) {
+      // Plan mode: opencode's `plan` primary agent already ships with its own
+      // stricter ruleset (edit denied except .opencode/plans/*.md). Stacking
+      // the medium-gate edit/write/patch=ask rules on top would just create
+      // redundant ask prompts during read-only planning. Skip the PATCH and
+      // let plan agent's defaults govern this turn. We intentionally do NOT
+      // mark rulesetApplied — once the user /plan off's and we resume normal
+      // turns, the next non-plan turn should re-apply the medium gate.
     } else if (!this.rulesetApplied.has(sessionID)) {
       // Resumed session: opencode loaded its previously-stored ruleset,
       // which may predate the current gate policy (older sessions were
@@ -436,7 +444,14 @@ export class OpenCodeHttpAdapter extends OpenCodeAdapter {
     //   none   → no override (mostly for debugging)
     const body: Record<string, unknown> = {
       title: 'im-hub session',
-      permission: this.buildSessionRuleset(),
+    }
+    // Plan mode: route through opencode's built-in `plan` agent and skip our
+    // medium-gate ruleset entirely (plan agent's edit-deny-except-plans
+    // policy is already stricter than the IM gate would impose).
+    if (opts.planMode) {
+      body.agent = 'plan'
+    } else {
+      body.permission = this.buildSessionRuleset()
     }
     const res = await this.fetchImpl(`${baseUrl}/session`, {
       method: 'POST',
@@ -470,6 +485,10 @@ export class OpenCodeHttpAdapter extends OpenCodeAdapter {
     }
     if (opts.model) body.model = opts.model
     if (opts.variant) body.variant = opts.variant
+    // planMode forces the plan agent on every turn, including resumed sessions
+    // that were originally created under build. opencode's per-message `agent`
+    // field overrides the session's default agent for this single turn.
+    if (opts.planMode) body.agent = 'plan'
     const res = await this.fetchImpl(`${baseUrl}/session/${sessionID}/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

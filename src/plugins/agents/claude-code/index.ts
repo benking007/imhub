@@ -67,12 +67,18 @@ export class ClaudeCodeAdapter extends AgentBase {
   /**
    * Legacy/fallback args — used when approval routing is disabled or not
    * applicable (no IM context, bus down, IMHUB_APPROVAL_DISABLED=1).
+   *
+   * planMode override: when opts.planMode is true we hand claude
+   * `--permission-mode plan` regardless of fallback path. plan is read-only
+   * by design so the IM approval bus has nothing to gate, and dontAsk would
+   * silently re-allow mutations the user explicitly opted out of.
    */
   protected buildArgs(prompt: string, opts: AgentSendOpts): string[] {
+    const mode = opts.planMode ? 'plan' : 'dontAsk'
     return [
       ...sessionFlag(opts),
       ...BASE_ARGS,
-      '--permission-mode', 'dontAsk',
+      '--permission-mode', mode,
       prompt,
     ]
   }
@@ -83,6 +89,15 @@ export class ClaudeCodeAdapter extends AgentBase {
     // tmpdir failure, etc.). Skipping cwd on the fallbacks would silently
     // demote those calls back to im-hub's "/" cwd and leak across memory.
     const cwd = resolveAgentCwd(this.name, opts)
+
+    // Plan mode short-circuits the approval-bus pipeline: claude's `plan`
+    // permission mode is strictly read-only, so there are no mutating tools
+    // for the IM bridge to gate. Skipping the mcp-config tmpdir + bus run
+    // registration also keeps cleanup trivial. buildArgs picks `--permission-mode plan`
+    // when opts.planMode is true.
+    if (opts.planMode) {
+      return { args: this.buildArgs(prompt, opts), cwd }
+    }
 
     if (process.env.IMHUB_APPROVAL_DISABLED === '1') {
       return { args: this.buildArgs(prompt, opts), cwd }

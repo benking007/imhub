@@ -239,6 +239,7 @@ class SessionManager {
       claudeSessionId: existing?.claudeSessionId,
       claudeSessionPrimed: existing?.claudeSessionPrimed,
       opencodeSessionId: existing?.opencodeSessionId,
+      planMode: existing?.planMode,
     }
 
     this.sessions.set(key, session)
@@ -285,7 +286,7 @@ class SessionManager {
    */
   async patchSession(
     platform: string, channelId: string, threadId: string,
-    patch: Partial<Pick<Session, 'model' | 'variant' | 'agent'>>,
+    patch: Partial<Pick<Session, 'model' | 'variant' | 'agent' | 'planMode'>>,
   ): Promise<Session | undefined> {
     const key = `${platform}:${channelId}:${threadId}`
     const session = this.sessions.get(key) || await this.loadSession(key)
@@ -293,6 +294,13 @@ class SessionManager {
     if (patch.model !== undefined) session.model = patch.model || undefined
     if (patch.variant !== undefined) session.variant = patch.variant || undefined
     if (patch.agent !== undefined) session.agent = patch.agent
+    if (patch.planMode !== undefined) {
+      // Normalize to canonical shape: true keeps the flag, false drops it.
+      // Storing only the truthy state keeps the on-disk JSON small and lets
+      // a missing field unambiguously mean "off".
+      if (patch.planMode) session.planMode = true
+      else delete session.planMode
+    }
     session.lastActivity = new Date()
     this.sessions.set(key, session)
     await this.saveSessionMeta(key, session)
@@ -401,6 +409,10 @@ class SessionManager {
       delete session.claudeSessionId
       delete session.claudeSessionPrimed
       delete session.opencodeSessionId
+      // Plan mode is per-conversation intent ("先规划再动手") — a fresh
+      // conversation always starts at "off" so users don't get a surprising
+      // read-only run after /new.
+      delete session.planMode
       // Drop any per-thread auto-allow approval rules so the new conversation
       // starts back at "ask every time".
       try { approvalBus.clearAutoAllowForThread(threadId) } catch { /* ignore */ }
@@ -622,6 +634,7 @@ class SessionManager {
         claudeSessionId: session.claudeSessionId,
         claudeSessionPrimed: session.claudeSessionPrimed,
         opencodeSessionId: session.opencodeSessionId,
+        planMode: session.planMode,
         messageCount: session.messages.length,
       }
       await this.atomicWrite(filePath, JSON.stringify(meta, null, 2))
@@ -666,6 +679,7 @@ class SessionManager {
         claudeSessionId: parsed.claudeSessionId,
         claudeSessionPrimed: parsed.claudeSessionPrimed,
         opencodeSessionId: parsed.opencodeSessionId,
+        planMode: parsed.planMode,
       }
       // Convert message timestamps from legacy format if present
       session.messages = session.messages.map((msg) => ({

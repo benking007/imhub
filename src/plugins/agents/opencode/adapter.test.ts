@@ -44,6 +44,22 @@ describe('OpenCodeAdapter buildArgs', () => {
     expect(args).toContain('--model')
     expect(args).toContain('--variant')
   })
+
+  it('injects --agent plan when planMode is true', () => {
+    const adapter = new OpenCodeAdapter()
+    const args = buildArgs(adapter, 'design X', { planMode: true })
+    const idx = args.indexOf('--agent')
+    expect(idx).toBeGreaterThanOrEqual(0)
+    expect(args[idx + 1]).toBe('plan')
+    // Prompt is still last positional.
+    expect(args[args.length - 1]).toBe('design X')
+  })
+
+  it('does not pass --agent when planMode is false / unset', () => {
+    const adapter = new OpenCodeAdapter()
+    expect(buildArgs(adapter, 'p', {})).not.toContain('--agent')
+    expect(buildArgs(adapter, 'p', { planMode: false })).not.toContain('--agent')
+  })
 })
 
 describe('OpenCodeAdapter inspectEvent — session id capture', () => {

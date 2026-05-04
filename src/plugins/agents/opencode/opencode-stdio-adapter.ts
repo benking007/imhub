@@ -57,6 +57,12 @@ export class OpenCodeAdapter extends AgentBase {
     if (opts.agentSessionId) args.push('--session', opts.agentSessionId)
     if (opts.model) args.push('--model', opts.model)
     if (opts.variant) args.push('--variant', opts.variant)
+    // planMode → opencode's built-in `plan` agent. Its policy denies edit/
+    // write outside .opencode/plans/*.md and allows the LLM to call
+    // `plan_exit` when it's done — but we intentionally do NOT auto-flip
+    // session.planMode on plan_exit (see docs/architecture/plan-mode.md);
+    // the user keeps control of the toggle via /plan off.
+    if (opts.planMode) args.push('--agent', 'plan')
     args.push(prompt)
     return args
   }

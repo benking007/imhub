@@ -566,3 +566,66 @@ describe('OpenCodeHttpAdapter.sendPrompt — happy path', () => {
     expect(chunks.some(c => c.includes('rate limited'))).toBe(true)
   })
 })
+
+describe('OpenCodeHttpAdapter.sendPrompt — plan mode', () => {
+  it('creates a session with agent=plan and no permission ruleset', async () => {
+    const sid = 'ses_plan_new'
+    const events: OpencodeEvent[] = [
+      { type: 'message.part.updated', properties: {
+          sessionID: sid,
+          part: { type: 'text', text: 'plan ready', time: { end: 1 } },
+        } },
+      { type: 'session.status', properties: { sessionID: sid, status: { type: 'idle' } } },
+    ]
+    const hits: MockedHit[] = []
+    const fetchImpl = makeFakeFetch(events, { sessionId: sid, hits })
+    const serve = makeServeStub('http://test.local')
+
+    const adapter = new OpenCodeHttpAdapter({ serve, fetchImpl })
+    await collect(adapter.sendPrompt('imhub-1', 'design X', [], { planMode: true }))
+
+    const createHit = hits.find(h => h.url === 'http://test.local/session' && h.method === 'POST')
+    expect(createHit).toBeDefined()
+    const createBody = createHit!.body as Record<string, unknown>
+    expect(createBody.agent).toBe('plan')
+    // plan agent's own ruleset governs — we MUST NOT stack our medium gate.
+    expect(createBody.permission).toBeUndefined()
+
+    const messageHit = hits.find(
+      h => h.url === `http://test.local/session/${sid}/message` && h.method === 'POST',
+    )
+    expect(messageHit).toBeDefined()
+    const messageBody = messageHit!.body as Record<string, unknown>
+    expect(messageBody.agent).toBe('plan')
+  })
+
+  it('on resume, posts agent=plan per message and skips ruleset PATCH', async () => {
+    const sid = 'ses_plan_resume'
+    const events: OpencodeEvent[] = [
+      { type: 'message.part.updated', properties: {
+          sessionID: sid,
+          part: { type: 'text', text: 'replanning', time: { end: 1 } },
+        } },
+      { type: 'session.status', properties: { sessionID: sid, status: { type: 'idle' } } },
+    ]
+    const hits: MockedHit[] = []
+    const fetchImpl = makeFakeFetch(events, { hits })
+    const serve = makeServeStub('http://test.local')
+
+    const adapter = new OpenCodeHttpAdapter({ serve, fetchImpl })
+    await collect(adapter.sendPrompt('imhub-1', 'redo plan', [], {
+      agentSessionId: sid,
+      agentSessionResume: true,
+      planMode: true,
+    }))
+
+    const urls = hits.map(h => `${h.method} ${h.url}`)
+    // Plan-mode resume must NOT PATCH the session — plan agent's own rules win.
+    expect(urls.some(u => u === `PATCH http://test.local/session/${sid}`)).toBe(false)
+    // But it MUST submit the prompt with agent=plan to override session default.
+    const messageHit = hits.find(
+      h => h.url === `http://test.local/session/${sid}/message` && h.method === 'POST',
+    )
+    expect((messageHit!.body as Record<string, unknown>).agent).toBe('plan')
+  })
+})

@@ -42,6 +42,7 @@ export type ParsedMessage =
   | { type: 'stats'; args: string }
   | { type: 'sessions'; args: string }
   | { type: 'approval'; args: string }
+  | { type: 'plan'; args: string }
   | { type: 'error'; prompt: string; error: string }
 
 /**
@@ -98,6 +99,14 @@ export interface Session {
    *  resumes the same conversation from its own DB and im-hub no longer needs
    *  to stitch the history into the prompt. Cleared by /new. */
   opencodeSessionId?: string
+  /** Plan mode flag — toggled by /plan on / /plan off. When true:
+   *    • claude-code adapter spawns with `--permission-mode plan` and bypasses
+   *      the IM approval bus (plan mode is read-only, no mutations to gate).
+   *    • opencode adapter routes through the built-in `plan` agent and skips
+   *      the medium-gate ruleset PATCH (plan agent's deny-edit policy is
+   *      already stricter than the IM gate).
+   *  Persists across turns and `/oc`↔`/cc` agent switches; cleared by /new. */
+  planMode?: boolean
 }
 
 export interface SessionUsage {
@@ -195,6 +204,11 @@ export interface AgentSendOpts {
    *  tokens). opencode's `step_finish` event carries this; cli accumulates
    *  the deltas to feed `recordUsage` so /stats reflects opencode cost. */
   onUsage?: (delta: { costUsd?: number; tokensInput?: number; tokensOutput?: number }) => void
+  /** When true, the adapter should run the agent in plan / read-only mode.
+   *  claude-code translates this to `--permission-mode plan`; opencode
+   *  translates it to `--agent plan` (stdio) or `agent: 'plan'` in the HTTP
+   *  body. Other adapters ignore this. See Session.planMode for lifecycle. */
+  planMode?: boolean
 }
 
 /**
