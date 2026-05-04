@@ -1,104 +1,36 @@
-// OpenCode CLI agent adapter
-// Uses `opencode run --format json` for programmatic interaction.
+// OpenCode adapter plugin entry — re-exports + driver factory.
 //
-// Two flavors of multi-turn continuity, mirroring the claude-code adapter:
+// Two drivers coexist:
+//   • stdio (default): opencode-stdio-adapter.ts — `opencode run --format json`
+//   • http: opencode-http-adapter.ts — `opencode serve` + REST + SSE (P1.5+)
 //
-//   First turn  — no opts.agentSessionId yet. Spawn `opencode run …` plain.
-//                 The adapter watches for `sessionID` on the very first event
-//                 and reports it back via opts.onAgentSessionId so cli can
-//                 persist it on the im-hub Session row.
-//   Later turns — opts.agentSessionId is the captured ses_… id. We pass
-//                 `--session <id>` so opencode reads the conversation from
-//                 its own DB instead of relying on im-hub stitching the
-//                 history into the prompt. router.callAgentWithHistory
-//                 honours this by zeroing out `effectiveHistory` whenever
-//                 `agentSessionResume` is true.
+// Selection: env IMHUB_OPENCODE_DRIVER=http picks the HTTP driver. Anything
+// else (incl unset, empty string, unrecognized value) keeps stdio. Default is
+// preserved as stdio so this PR is a no-op until ops flip the env.
 //
-// Cost accounting: opencode emits `cost` and `tokens.{input,output}` in
-// `step_finish` events. We forward those as opts.onUsage deltas so /stats
-// reflects opencode reality (it had been hard-coded to 0 before).
+// Why a runtime env switch instead of config: lets us A/B inside a single
+// systemd unit by restarting with the env set, with zero config-file edits.
+// Once HTTP is proven we promote it to default and can drop the switch.
 
-import { AgentBase, type SpawnPlan } from '../../../core/agent-base.js'
-import type { AgentSendOpts } from '../../../core/types.js'
-import { resolveAgentCwd } from '../../../core/agent-cwd.js'
+import { logger } from '../../../core/logger.js'
+import { OpenCodeAdapter } from './opencode-stdio-adapter.js'
+import { OpenCodeHttpAdapter } from './opencode-http-adapter.js'
 
-interface OpenCodeEvent {
-  type: string
-  sessionID?: string
-  content?: string
-  text?: string
-  /**
-   * The actual event payload. opencode wraps every meaningful field
-   * (text body, cost, tokens, reason) inside `part`, not the top-level
-   * event. The outer event only carries `type` / `sessionID` / `timestamp`.
-   * Getting this wrong is silently 0 on /stats — we did exactly that in
-   * the first cut of this adapter.
-   */
-  part?: {
-    type: string
-    text?: string
-    tokens?: { input?: number; output?: number; total?: number; reasoning?: number }
-    cost?: number
+export { OpenCodeAdapter } from './opencode-stdio-adapter.js'
+export { OpenCodeHttpAdapter } from './opencode-http-adapter.js'
+
+function createOpencodeAdapter(): OpenCodeAdapter {
+  const driver = (process.env.IMHUB_OPENCODE_DRIVER || '').toLowerCase()
+  if (driver === 'http') {
+    return new OpenCodeHttpAdapter()
   }
+  if (driver && driver !== 'stdio') {
+    logger.warn(
+      { component: 'agent.opencode', requestedDriver: driver, fallback: 'stdio' },
+      `[opencode] unknown IMHUB_OPENCODE_DRIVER=${driver}, falling back to stdio`,
+    )
+  }
+  return new OpenCodeAdapter()
 }
 
-export class OpenCodeAdapter extends AgentBase {
-  readonly name = 'opencode'
-  readonly aliases = ['oc', 'opencodeai']
-
-  protected buildArgs(prompt: string, opts: AgentSendOpts): string[] {
-    const args = ['run', '--format', 'json']
-    if (opts.agentSessionId) args.push('--session', opts.agentSessionId)
-    if (opts.model) args.push('--model', opts.model)
-    if (opts.variant) args.push('--variant', opts.variant)
-    args.push(prompt)
-    return args
-  }
-
-  /**
-   * opencode keys its per-project AGENTS.md and memory off the spawn cwd,
-   * so for IM calls we pin to ~/.im-hub-workspaces/opencode/. Non-IM calls
-   * (web/scheduler) keep cwd undefined and inherit im-hub's cwd, preserving
-   * the prior behavior. See agent-cwd.ts for full rationale.
-   */
-  protected async prepareCommand(prompt: string, opts: AgentSendOpts): Promise<SpawnPlan> {
-    return {
-      args: this.buildArgs(prompt, opts),
-      cwd: resolveAgentCwd(this.name, opts),
-    }
-  }
-
-  protected extractText(event: unknown): string {
-    const e = event as OpenCodeEvent
-    if (e.type === 'text' && e.part?.text) return e.part.text
-    if (e.type === 'content' && e.content) return e.content
-    return ''
-  }
-
-  /**
-   * Pull metadata out of every event:
-   *   - `sessionID` on any event → bubble up via opts.onAgentSessionId so cli
-   *     can persist it. Idempotent (the callback handles dedup).
-   *   - `cost` / `tokens` on `step_finish` → bubble up via opts.onUsage so
-   *     callAgentWithHistory can roll into /stats.
-   */
-  protected inspectEvent(event: unknown, opts: AgentSendOpts): void {
-    const e = event as OpenCodeEvent
-    if (e.sessionID && opts.onAgentSessionId) {
-      try { opts.onAgentSessionId(e.sessionID) } catch { /* don't let userland callbacks kill the stream */ }
-    }
-    if (e.type === 'step_finish' && opts.onUsage) {
-      // cost / tokens are NESTED inside event.part, not on the event itself.
-      const part = e.part
-      const delta: { costUsd?: number; tokensInput?: number; tokensOutput?: number } = {}
-      if (typeof part?.cost === 'number' && Number.isFinite(part.cost)) delta.costUsd = part.cost
-      if (typeof part?.tokens?.input === 'number') delta.tokensInput = part.tokens.input
-      if (typeof part?.tokens?.output === 'number') delta.tokensOutput = part.tokens.output
-      if (delta.costUsd !== undefined || delta.tokensInput !== undefined || delta.tokensOutput !== undefined) {
-        try { opts.onUsage(delta) } catch { /* same — user callback safety */ }
-      }
-    }
-  }
-}
-
-export const opencodeAdapter = new OpenCodeAdapter()
+export const opencodeAdapter = createOpencodeAdapter()
