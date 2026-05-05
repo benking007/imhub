@@ -12,8 +12,14 @@ import type {
 } from '../../../core/types.js'
 import type { TelegramConfig } from './types.js'
 import { markdownToTelegramHtml } from './markdown-to-html.js'
+import {
+  cleanupOldMedia,
+  downloadToMediaRoot,
+  pickExtension,
+} from './media-download.js'
 import { splitMessage } from '../../../utils/message-split.js'
 import { logger as rootLogger } from '../../../core/logger.js'
+import { transcribe, detectProvider, TranscribeError } from '../../../core/transcribe.js'
 
 const log = rootLogger.child({ component: 'telegram' })
 
@@ -33,6 +39,8 @@ export class TelegramAdapter implements MessengerAdapter {
   private consecutivePingFailures = 0
   private static readonly WATCHDOG_INTERVAL_MS = 60_000
   private static readonly WATCHDOG_FAILURE_THRESHOLD = 3 // ~3min 无响应就重启 polling
+  private mediaCleanupTimer?: ReturnType<typeof setInterval>
+  private static readonly MEDIA_CLEANUP_INTERVAL_MS = 60 * 60 * 1000  // hourly
 
   async start(): Promise<void> {
     // Load config
@@ -88,6 +96,57 @@ export class TelegramAdapter implements MessengerAdapter {
         const stack = err instanceof Error ? err.stack : undefined
         log.error({ err: errMsg, stack, threadId: message.threadId }, 'Error in message handler')
       })
+    })
+
+    // Media handlers — TG photos and image documents. We await the download
+    // inside the handler (it's bounded; typical TG photo is < 1 s, hard cap
+    // 20 MB) so the resulting Message reflects the image being on disk before
+    // we kick off the agent. messageHandler itself is fire-and-forget for the
+    // same reasons as message:text above. Order across photo / text within a
+    // chat is preserved because grammy serializes updates per chat.
+    this.bot.on('message:photo', (ctx) => {
+      if (ctx.message.from?.is_bot) return
+      if (!this.messageHandler) return
+      // Largest size is the last entry — TG ships scaled-down siblings for
+      // bandwidth-conscious clients which we ignore.
+      const photo = ctx.message.photo[ctx.message.photo.length - 1]
+      void this.handleMediaUpload(ctx, photo.file_id, undefined, ctx.message.caption ?? '')
+    })
+
+    this.bot.on('message:document', (ctx) => {
+      if (ctx.message.from?.is_bot) return
+      if (!this.messageHandler) return
+      const doc = ctx.message.document
+      // Image documents → media upload path. Audio documents → voice path.
+      // Anything else gets dropped (videos / archives / misc).
+      if (doc.mime_type?.startsWith('image/')) {
+        void this.handleMediaUpload(ctx, doc.file_id, doc.mime_type, ctx.message.caption ?? '')
+        return
+      }
+      if (doc.mime_type?.startsWith('audio/')) {
+        // Document type has no `duration` field even when MIME is audio/*;
+        // only message:voice / message:audio carry it. Pass undefined.
+        void this.handleVoiceUpload(ctx, doc.file_id, doc.mime_type, ctx.message.caption ?? '', undefined)
+        return
+      }
+      log.debug({ mime: doc.mime_type, chatId: ctx.chat.id }, 'ignoring non-image/audio document')
+    })
+
+    // Voice messages (the mic-button "press and hold" recording, OGG OPUS).
+    // Caption is rare on voice but TG allows it.
+    this.bot.on('message:voice', (ctx) => {
+      if (ctx.message.from?.is_bot) return
+      if (!this.messageHandler) return
+      const v = ctx.message.voice
+      void this.handleVoiceUpload(ctx, v.file_id, v.mime_type, ctx.message.caption ?? '', v.duration)
+    })
+
+    // Audio messages (a music file or the "Audio" attachment button).
+    this.bot.on('message:audio', (ctx) => {
+      if (ctx.message.from?.is_bot) return
+      if (!this.messageHandler) return
+      const a = ctx.message.audio
+      void this.handleVoiceUpload(ctx, a.file_id, a.mime_type, ctx.message.caption ?? '', a.duration)
     })
 
     // Inline-button taps (approval cards). Same fire-and-forget discipline
@@ -172,7 +231,23 @@ export class TelegramAdapter implements MessengerAdapter {
     this.isRunning = true
     void this.runPollingLoop()
     this.startWatchdog()
+    this.startMediaCleanup()
     log.info('Telegram adapter started')
+  }
+
+  /** Run media cleanup once now (so a long-running im-hub doesn't accumulate
+   *  files indefinitely when restarts are infrequent) and then hourly. The
+   *  hourly cadence matches the typical 7-day TTL with plenty of slack. */
+  private startMediaCleanup(): void {
+    if (this.mediaCleanupTimer) clearInterval(this.mediaCleanupTimer)
+    void cleanupOldMedia().catch((err) => {
+      log.warn({ err: String(err), event: 'telegram.media.cleanup_failed' }, 'startup media cleanup failed')
+    })
+    this.mediaCleanupTimer = setInterval(() => {
+      void cleanupOldMedia().catch((err) => {
+        log.warn({ err: String(err), event: 'telegram.media.cleanup_failed' }, 'periodic media cleanup failed')
+      })
+    }, TelegramAdapter.MEDIA_CLEANUP_INTERVAL_MS)
   }
 
   private async runPollingLoop(): Promise<void> {
@@ -233,6 +308,10 @@ export class TelegramAdapter implements MessengerAdapter {
       clearInterval(this.watchdogTimer)
       this.watchdogTimer = undefined
     }
+    if (this.mediaCleanupTimer) {
+      clearInterval(this.mediaCleanupTimer)
+      this.mediaCleanupTimer = undefined
+    }
 
     // Clean up all typing intervals
     for (const interval of this.typingIntervals.values()) {
@@ -250,6 +329,156 @@ export class TelegramAdapter implements MessengerAdapter {
 
   onMessage(handler: (ctx: MessageContext) => Promise<void>): void {
     this.messageHandler = handler
+  }
+
+  /**
+   * Download a TG photo / image-document, save it under MEDIA_ROOT, and surface
+   * the result to messageHandler as a Message whose `text` includes the
+   * caption (if any) plus a "[图片附件：/path/x.jpg]" marker — claude-code
+   * picks that up and uses Read to view it.
+   *
+   * On download failure we still call messageHandler with a "[图片下载失败]"
+   * marker so the user's interaction isn't silently dropped — they can resend
+   * or be told what went wrong.
+   */
+  private async handleMediaUpload(
+    ctx: Context,
+    fileId: string,
+    mime: string | undefined,
+    caption: string,
+  ): Promise<void> {
+    if (!this.bot || !ctx.chat || !ctx.message) return
+    const chatId = ctx.chat.id
+    const msgId = ctx.message.message_id
+    let attachmentLine: string
+    try {
+      const file = await this.bot.api.getFile(fileId)
+      if (!file.file_path) throw new Error('TG returned no file_path')
+      const ext = pickExtension(file.file_path, mime)
+      const url = `https://api.telegram.org/file/bot${this.config!.botToken}/${file.file_path}`
+      const { path } = await downloadToMediaRoot({
+        url,
+        subdir: `telegram/${chatId}`,
+        filename: `${msgId}.${ext}`,
+      })
+      attachmentLine = `[图片附件：${path}]`
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      log.warn({ event: 'telegram.media.download_failed', err: msg, chatId, msgId }, 'media download failed')
+      attachmentLine = `[图片附件下载失败：${msg}]`
+    }
+
+    const text = caption ? `${caption}\n\n${attachmentLine}` : attachmentLine
+    const message: Message = {
+      id: msgId.toString(),
+      threadId: chatId.toString(),
+      userId: ctx.message.from?.id?.toString() || 'unknown',
+      text,
+      timestamp: new Date(ctx.message.date * 1000),
+      channelId: this.config?.channelId || 'default',
+    }
+    const msgCtx: MessageContext = {
+      message,
+      platform: 'telegram',
+      channelId: this.config?.channelId || 'default',
+    }
+    if (!this.messageHandler) return
+    this.messageHandler(msgCtx).catch((err) => {
+      log.error({
+        err: err instanceof Error ? err.message : String(err),
+        threadId: message.threadId,
+      }, 'Error in media message handler')
+    })
+  }
+
+  /**
+   * Download a TG voice / audio message, transcribe it via whichever provider
+   * is configured (OpenAI Whisper or whisper.cpp), and surface the transcript
+   * to messageHandler as Message.text. The downloaded audio file path is
+   * also included so the agent can reference it (e.g. send it back, replay).
+   *
+   * Failures are surfaced as text markers, not silent drops:
+   *   - download failure → "[语音附件下载失败：…]"
+   *   - no provider configured → "[语音附件未转写：未配置 OPENAI_API_KEY 或 IMHUB_WHISPERCPP_BIN]"
+   *   - transcribe error → "[语音转写失败（${provider}）：…]"
+   *
+   * Since transcription can take 5-30s on a slow CPU + whisper.cpp medium,
+   * we fire-and-forget the entire operation so grammy's update queue keeps
+   * draining for other chats. Within this chat, ordering is still serialized
+   * by grammy.
+   */
+  private async handleVoiceUpload(
+    ctx: Context,
+    fileId: string,
+    mime: string | undefined,
+    caption: string,
+    durationSec: number | undefined,
+  ): Promise<void> {
+    if (!this.bot || !ctx.chat || !ctx.message) return
+    const chatId = ctx.chat.id
+    const msgId = ctx.message.message_id
+
+    let savedPath: string | null = null
+    let downloadErr: string | null = null
+    try {
+      const file = await this.bot.api.getFile(fileId)
+      if (!file.file_path) throw new Error('TG returned no file_path')
+      const ext = pickExtension(file.file_path, mime)
+      const url = `https://api.telegram.org/file/bot${this.config!.botToken}/${file.file_path}`
+      const { path } = await downloadToMediaRoot({
+        url,
+        subdir: `telegram/${chatId}`,
+        filename: `${msgId}.${ext}`,
+      })
+      savedPath = path
+    } catch (err) {
+      downloadErr = err instanceof Error ? err.message : String(err)
+      log.warn({ event: 'telegram.voice.download_failed', err: downloadErr, chatId, msgId }, 'voice download failed')
+    }
+
+    let voiceLine: string
+    if (!savedPath) {
+      voiceLine = `[语音附件下载失败：${downloadErr}]`
+    } else if (detectProvider() === 'none') {
+      voiceLine = `[语音附件未转写（未配置 OPENAI_API_KEY 或 IMHUB_WHISPERCPP_BIN）：${savedPath}]`
+    } else {
+      try {
+        const result = await transcribe(savedPath, { language: 'zh' })
+        const dur = durationSec != null ? `${durationSec}s, ` : ''
+        voiceLine = [
+          `[语音转写（${dur}provider=${result.provider}, ${result.elapsedMs}ms）：`,
+          result.text || '（空）',
+          `源文件：${savedPath}]`,
+        ].join('\n')
+      } catch (err) {
+        const reason = err instanceof TranscribeError
+          ? `${err.provider}: ${err.reason}`
+          : err instanceof Error ? err.message : String(err)
+        voiceLine = `[语音转写失败（${reason}）\n源文件：${savedPath}]`
+      }
+    }
+
+    const text = caption ? `${caption}\n\n${voiceLine}` : voiceLine
+    const message: Message = {
+      id: msgId.toString(),
+      threadId: chatId.toString(),
+      userId: ctx.message.from?.id?.toString() || 'unknown',
+      text,
+      timestamp: new Date(ctx.message.date * 1000),
+      channelId: this.config?.channelId || 'default',
+    }
+    const msgCtx: MessageContext = {
+      message,
+      platform: 'telegram',
+      channelId: this.config?.channelId || 'default',
+    }
+    if (!this.messageHandler) return
+    this.messageHandler(msgCtx).catch((err) => {
+      log.error({
+        err: err instanceof Error ? err.message : String(err),
+        threadId: message.threadId,
+      }, 'Error in voice message handler')
+    })
   }
 
   async sendMessage(threadId: string, text: string): Promise<void> {
