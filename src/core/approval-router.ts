@@ -6,12 +6,25 @@
 //
 // 不知道 messenger 实现细节，只通过注入的 resolveMessenger 拿到 sendMessage/sendCard。
 
-import type { MessengerAdapter } from './types.js'
-import { approvalBus, type ApprovalNotification, type Decision, type ResolvedInfo } from './approval-bus.js'
+import type {
+  MessengerAdapter,
+  ButtonCallback,
+  ApprovalCardPrompt,
+  ApprovalCardOutcome,
+} from './types.js'
+import {
+  approvalBus,
+  type ApprovalNotification,
+  type Decision,
+  type ResolvedInfo,
+} from './approval-bus.js'
 import { logger as rootLogger } from './logger.js'
 
 const log = rootLogger.child({ component: 'approval-router' })
 
+/** Truncation limit for the plain-text approval prompt. Conservative because
+ *  some IMs (older WeChat clients) start chunking aggressively past ~500
+ *  chars and the y/n line at the bottom must stay visible. */
 const MAX_INPUT_PREVIEW = 400
 
 const ALLOW_TOKENS = new Set([
@@ -97,13 +110,41 @@ export function platformToMessengerName(platform: string): string {
 
 export interface InstallOptions {
   resolveMessenger: (platform: string) => MessengerAdapter | undefined
+  /** Optional. Platform names whose messengers should have button-callback
+   *  support bound at install time. Adapters that don't implement
+   *  onButtonCallback are silently skipped. Defaults to all known IM
+   *  platforms; existing tests / callers don't need to pass this. */
+  buttonCallbackPlatforms?: string[]
 }
 
 let installed: InstallOptions | null = null
 
+/** Per-reqId card tracking. Populated when sendApprovalCard succeeds; cleared
+ *  when the card is edited to its terminal state (via button click or text
+ *  reply that triggers editCardOnThreadResolution). Survives only in memory —
+ *  bus restart wipes pendings anyway. */
+interface ActiveCard {
+  platform: string
+  threadId: string
+  messageId: string
+}
+const activeCards = new Map<string, ActiveCard>()
+
 /**
  * Wire approval-bus.notifier to the messenger layer. Idempotent: calling
  * install() twice replaces the previous wiring.
+ *
+ * Notifier prefers the rich-card path (sendApprovalCard) when the resolved
+ * adapter implements it; otherwise it falls back to the plain-text path
+ * (sendMessage with formatApprovalPrompt). The text path is the canonical
+ * approval channel for adapters without native interactive buttons (Feishu
+ * cards aren't wired for buttons yet, WeChat iLink can't render them).
+ *
+ * Button callbacks: for each platform listed in buttonCallbackPlatforms
+ * whose adapter implements onButtonCallback, we subscribe a handler that
+ * parses callback_data of the form `apv:<reqId>:<y|n|a>` and resolves the
+ * matching pending. Subscribing happens once at install — adapters started
+ * later won't receive button wiring until install() is called again.
  */
 export function install(opts: InstallOptions): void {
   installed = opts
@@ -115,15 +156,64 @@ export function install(opts: InstallOptions): void {
       // Throwing tells the bus to auto-deny this request.
       throw new Error(`no messenger for platform ${n.ctx.platform}`)
     }
+
+    // Rich-card path (Telegram inline keyboard).
+    if (m.sendApprovalCard) {
+      const prompt: ApprovalCardPrompt = {
+        reqId: n.reqId,
+        toolName: n.toolName,
+        inputJson: safeStringify(n.input, MAX_INPUT_PREVIEW),
+        mode: n.autoAllow ? 'auto-allow' : 'normal',
+        graceSeconds: n.autoAllow ? Math.round(n.autoAllow.graceMs / 1000) : undefined,
+      }
+      try {
+        const { messageId } = await m.sendApprovalCard(n.ctx.threadId, prompt)
+        activeCards.set(n.reqId, {
+          platform: n.ctx.platform,
+          threadId: n.ctx.threadId,
+          messageId,
+        })
+        log.info({
+          event: 'approval.router.card_sent',
+          platform: n.ctx.platform,
+          threadId: n.ctx.threadId,
+          reqId: n.reqId,
+          messageId,
+        })
+        return
+      } catch (err) {
+        log.warn({
+          event: 'approval.router.card_failed_fallback',
+          err: String(err),
+          reqId: n.reqId,
+        }, 'sendApprovalCard threw; falling back to text path')
+        // Fall through to text path
+      }
+    }
+
+    // Text path (Feishu / WeChat / any adapter without sendApprovalCard).
     const text = formatApprovalPrompt(n)
     await m.sendMessage(n.ctx.threadId, text)
     log.info({ event: 'approval.router.prompt_sent', platform: n.ctx.platform, threadId: n.ctx.threadId, reqId: n.reqId })
   })
+
+  const platforms = opts.buttonCallbackPlatforms ?? ['telegram', 'feishu', 'wechat']
+  for (const platform of platforms) {
+    const m = opts.resolveMessenger(platform)
+    if (m?.onButtonCallback) {
+      m.onButtonCallback(async (cb) => handleButtonCallback(platform, cb))
+      log.info({ event: 'approval.router.button_handler_bound', platform })
+    }
+  }
 }
 
 export function uninstall(): void {
   installed = null
   approvalBus.setNotifier(null)
+  activeCards.clear()
+  // Note: we don't unsubscribe button handlers from messengers — tests that
+  // re-install will overwrite via onButtonCallback's "replace previous"
+  // contract. Production never uninstalls.
 }
 
 /**
@@ -149,18 +239,154 @@ export function tryHandleApprovalReply(threadId: string, text: string): boolean 
   if (decision) {
     const info = approvalBus.resolvePending(threadId, decision)
     log.info({ event: 'approval.router.resolved', threadId, behavior: decision.behavior })
-    if (info) sendReceiptIfAny(info, decision)
+    if (info) {
+      editCardOnThreadResolution(threadId, info, decision, undefined)
+      sendReceiptIfAny(info, decision)
+    }
     return true
   }
   // Unrecognized reply while a pending exists → treat as redirect: deny so
   // the sidecar (and ultimately Claude) doesn't keep waiting, but let the
   // user's actual message route normally.
-  approvalBus.resolvePending(threadId, {
+  const redirectDecision: Decision = {
     behavior: 'deny',
     message: '用户在 IM 中改换话题，未给出审批回复',
-  })
+  }
+  const info = approvalBus.resolvePending(threadId, redirectDecision)
+  if (info) editCardOnThreadResolution(threadId, info, redirectDecision, undefined)
   log.info({ event: 'approval.router.redirected', threadId })
   return false
+}
+
+/**
+ * Inline-button handler. callback_data format: `apv:<reqId>:<y|n|a>`.
+ * Resolves the matching pending via approvalBus.resolvePending, acks the
+ * button (must happen within ~1s on Telegram), edits the card to its
+ * terminal state, and sends the same auto-allow receipt the text path
+ * would send.
+ *
+ * Late clicks (already resolved or expired): we ack with a soft hint and
+ * try to edit the card to the "expired" state so subsequent users see a
+ * clean terminal view.
+ */
+async function handleButtonCallback(platform: string, cb: ButtonCallback): Promise<void> {
+  const parsed = parseCallbackData(cb.data)
+  if (!parsed) {
+    await cb.ack('未识别的按钮')
+    return
+  }
+  const decision = decisionFromButton(parsed.choice)
+  const info = approvalBus.resolvePending(cb.threadId, decision)
+
+  if (!info) {
+    await cb.ack('请求已过期或已被处理')
+    if (installed) {
+      const m = installed.resolveMessenger(platform)
+      if (m?.editApprovalCard) {
+        await m.editApprovalCard(cb.threadId, cb.messageId, {
+          decision: 'expired',
+          atDate: new Date(),
+        }).catch((err) => {
+          log.warn({ event: 'approval.router.expire_edit_failed', err: String(err) })
+        })
+      }
+    }
+    activeCards.delete(parsed.reqId)
+    return
+  }
+
+  const ackText = decision.behavior === 'allow'
+    ? (decision.autoAllowFurther ? '🛡 已批准并自动放行' : '✅ 已批准')
+    : (info.wasAutoAllow ? '❌ 已拒绝并撤销规则' : '❌ 已拒绝')
+  await cb.ack(ackText)
+
+  if (installed) {
+    const m = installed.resolveMessenger(info.platform)
+    if (m?.editApprovalCard) {
+      const outcome: ApprovalCardOutcome = {
+        decision: outcomeFromDecision(decision, info.wasAutoAllow),
+        byUserDisplay: cb.userDisplay,
+        atDate: new Date(),
+      }
+      await m.editApprovalCard(cb.threadId, cb.messageId, outcome).catch((err) => {
+        log.warn({ event: 'approval.router.edit_failed', err: String(err) })
+      })
+    }
+  }
+  activeCards.delete(parsed.reqId)
+
+  log.info({
+    event: 'approval.router.button_resolved',
+    platform,
+    threadId: cb.threadId,
+    behavior: decision.behavior,
+    autoAllowFurther: decision.behavior === 'allow' && decision.autoAllowFurther === true,
+  })
+
+  sendReceiptIfAny(info, decision)
+}
+
+/** Find the active card belonging to this thread (the one matching the head
+ *  of the pending queue we just resolved) and edit it to its terminal state.
+ *  Used by the text-reply path so y/n typed messages also collapse the card
+ *  on Telegram. No-op when no card was registered (other IMs / fallback). */
+function editCardOnThreadResolution(
+  threadId: string,
+  info: ResolvedInfo,
+  decision: Decision,
+  byUserDisplay: string | undefined,
+): void {
+  if (!installed) return
+  let target: { reqId: string; card: ActiveCard } | null = null
+  for (const [reqId, card] of activeCards) {
+    if (card.threadId === threadId) {
+      target = { reqId, card }
+      break
+    }
+  }
+  if (!target) return
+  activeCards.delete(target.reqId)
+  const m = installed.resolveMessenger(info.platform)
+  if (!m?.editApprovalCard) return
+  const outcome: ApprovalCardOutcome = {
+    decision: outcomeFromDecision(decision, info.wasAutoAllow),
+    byUserDisplay,
+    atDate: new Date(),
+  }
+  m.editApprovalCard(target.card.threadId, target.card.messageId, outcome).catch((err) => {
+    log.warn({ event: 'approval.router.edit_failed', err: String(err) })
+  })
+}
+
+function outcomeFromDecision(d: Decision, wasAutoAllow: boolean): ApprovalCardOutcome['decision'] {
+  if (d.behavior === 'allow') {
+    return d.autoAllowFurther ? 'allowed-pinned' : 'allowed'
+  }
+  return wasAutoAllow ? 'denied-revoked' : 'denied'
+}
+
+/**
+ * Parse callback_data of the form `apv:<reqId>:<y|n|a>`. reqId may itself
+ * contain characters but never `:` in practice (UUID / opaque sidecar id);
+ * we still split on the LAST colon to be safe, leaving the choice as the
+ * single trailing letter.
+ */
+export function parseCallbackData(data: string): { reqId: string; choice: 'y' | 'n' | 'a' } | null {
+  if (!data.startsWith('apv:')) return null
+  const rest = data.slice(4)
+  const lastColon = rest.lastIndexOf(':')
+  if (lastColon <= 0) return null
+  const reqId = rest.slice(0, lastColon)
+  const choice = rest.slice(lastColon + 1)
+  if (choice !== 'y' && choice !== 'n' && choice !== 'a') return null
+  if (!reqId) return null
+  return { reqId, choice }
+}
+
+function decisionFromButton(choice: 'y' | 'n' | 'a'): Decision {
+  if (choice === 'y') return { behavior: 'allow' }
+  if (choice === 'a') return { behavior: 'allow', autoAllowFurther: true }
+  return { behavior: 'deny', message: '用户在 IM 中拒绝了这次工具调用（按钮）' }
 }
 
 /**

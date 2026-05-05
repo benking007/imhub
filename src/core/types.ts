@@ -166,6 +166,97 @@ export interface MessengerAdapter {
    * Adapters that prefer their native typing indicator can omit this method.
    */
   sendThinking?(threadId: string, text: string): Promise<ThinkingHandle | undefined>
+  /**
+   * Subscribe to inline-button (callback_query) events. Adapters that support
+   * native interactive buttons (Telegram inline keyboard, Feishu card actions
+   * once we wire them) call the handler when a user taps a button. Adapters
+   * without native button support simply omit this method — approval-router
+   * falls back to its text/y-n flow.
+   *
+   * Idempotent: re-registering replaces the previous handler.
+   */
+  onButtonCallback?(handler: (cb: ButtonCallback) => Promise<void>): void
+  /**
+   * Send an approval prompt as a rich card with action buttons. When this
+   * method is implemented, approval-router prefers it over plain
+   * sendMessage. The returned messageId is later passed to editApprovalCard
+   * so the card can be replaced with the outcome (✅ / ❌ / ⏱).
+   *
+   * Adapters that don't implement this fall back to sendMessage(text) — the
+   * text path remains the canonical approval channel for Feishu / WeChat /
+   * any IM that doesn't have native button support.
+   */
+  sendApprovalCard?(threadId: string, prompt: ApprovalCardPrompt): Promise<{ messageId: string }>
+  /**
+   * Replace the body of an approval card after the request has been resolved
+   * (allowed / denied / timed out). Best-effort: failure is logged and
+   * swallowed by the router, since the underlying approval has already
+   * resolved on the bus side.
+   */
+  editApprovalCard?(threadId: string, messageId: string, outcome: ApprovalCardOutcome): Promise<void>
+}
+
+/**
+ * Inline-button tap event surfaced by adapters that implement
+ * onButtonCallback. The data field is opaque to the adapter; consumers
+ * (approval-router, future button consumers) parse it.
+ *
+ * ack MUST be called within ~1s on Telegram or the client shows a stuck
+ * "loading" spinner — adapters wrap their platform-native ack so callers
+ * can stay platform-agnostic.
+ */
+export interface ButtonCallback {
+  /** Raw callback_data string (Telegram caps at 64 bytes UTF-8). */
+  data: string
+  threadId: string
+  userId: string
+  /** Display name for the user who tapped (e.g. "@benking" or first_name).
+   *  Used for "已批准 by @benking" rendering. Optional — adapters that
+   *  can't easily resolve a display name should leave it undefined. */
+  userDisplay?: string
+  /** ID of the message that owned the button — passed back to
+   *  editApprovalCard for in-place updates. */
+  messageId: string
+  /** Acknowledge the button tap to the platform. Optional toast text
+   *  (Telegram shows it briefly above the chat). Errors are swallowed. */
+  ack: (text?: string) => Promise<void>
+}
+
+/**
+ * Payload handed to sendApprovalCard. inputJson is already truncated to a
+ * display-safe length by the caller (router) — adapters should render it
+ * as-is in a code block.
+ */
+export interface ApprovalCardPrompt {
+  /** Bus-side request id; embedded in callback_data so the button click
+   *  knows which approval to resolve. Adapters must not depend on its
+   *  internal format. */
+  reqId: string
+  toolName: string
+  /** Stringified input, already length-capped. May contain newlines. */
+  inputJson: string
+  /** 'normal' = ask user; 'auto-allow' = grace window before automatic
+   *  allow (only the deny button is meaningful). */
+  mode: 'normal' | 'auto-allow'
+  /** Auto-allow grace window in seconds, present iff mode === 'auto-allow'. */
+  graceSeconds?: number
+}
+
+/**
+ * Outcome rendered into a card after the approval is resolved. The card's
+ * action buttons are removed during this edit so the user can no longer
+ * tap a stale button.
+ */
+export interface ApprovalCardOutcome {
+  decision:
+    | 'allowed'           // user said yes
+    | 'allowed-pinned'    // user said yes + auto-allow this kind in session
+    | 'denied'            // user said no
+    | 'denied-revoked'    // user said no while a previous auto-allow rule was in effect
+    | 'expired'           // approval-bus timed out before any decision
+  /** "@user" or first name of the human who decided, if known. */
+  byUserDisplay?: string
+  atDate: Date
 }
 
 /** Optional callback returned by sendThinking; invoked once the real response

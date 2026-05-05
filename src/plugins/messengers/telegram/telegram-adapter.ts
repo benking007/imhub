@@ -2,7 +2,14 @@
 // Implements MessengerAdapter interface with native typing indicator support
 
 import { Bot, Context } from 'grammy'
-import type { MessengerAdapter, MessageContext, Message } from '../../../core/types.js'
+import type {
+  MessengerAdapter,
+  MessageContext,
+  Message,
+  ButtonCallback,
+  ApprovalCardPrompt,
+  ApprovalCardOutcome,
+} from '../../../core/types.js'
 import type { TelegramConfig } from './types.js'
 import { markdownToTelegramHtml } from './markdown-to-html.js'
 import { splitMessage } from '../../../utils/message-split.js'
@@ -15,8 +22,17 @@ export class TelegramAdapter implements MessengerAdapter {
   private bot: Bot | null = null
   private config: TelegramConfig | null = null
   private messageHandler?: (ctx: MessageContext) => Promise<void>
+  private buttonHandler?: (cb: ButtonCallback) => Promise<void>
   private isRunning = false
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>()
+  // grammy 的 bot.start() 长轮询偶尔会被一次网络抖动 wedge —— 既不报错也不
+  // resolve，看起来还在跑但不再 fetch updates，TG 那边 pending_update_count
+  // 一路涨。watchdog 周期性 ping getMe；连续多次失败就强制 stop+start，让
+  // 卡死的 polling loop 重置。
+  private watchdogTimer?: ReturnType<typeof setInterval>
+  private consecutivePingFailures = 0
+  private static readonly WATCHDOG_INTERVAL_MS = 60_000
+  private static readonly WATCHDOG_FAILURE_THRESHOLD = 3 // ~3min 无响应就重启 polling
 
   async start(): Promise<void> {
     // Load config
@@ -40,61 +56,164 @@ export class TelegramAdapter implements MessengerAdapter {
     // Initialize bot
     this.bot = new Bot(this.config.botToken)
 
-    // Set up message handler
-    this.bot.on('message:text', async (ctx) => {
-      log.debug({ text: ctx.message.text }, 'Received message')
+    // Set up message handler.
+    //
+    // CRITICAL: do NOT await messageHandler here. grammy processes updates
+    // sequentially per chat — if the handler awaits an agent run that's
+    // waiting on a separate IM-side approval reply, polling stalls and the
+    // user's approval reply piles up in TG's pending_update_count, never
+    // reaching us. Fire-and-forget mirrors how the WeChat ilink adapter
+    // dispatches (ilink-adapter.ts:258).
+    this.bot.on('message:text', (ctx) => {
       // Ignore messages from bots
-      if (ctx.message.from.is_bot) {
-        log.debug('Ignoring bot message')
-        return
+      if (ctx.message.from.is_bot) return
+      if (!this.messageHandler) return
+
+      const message: Message = {
+        id: ctx.message.message_id.toString(),
+        threadId: ctx.chat.id.toString(),
+        userId: ctx.message.from?.id?.toString() || 'unknown',
+        text: ctx.message.text || '',
+        timestamp: new Date(ctx.message.date * 1000),
+        channelId: this.config?.channelId || 'default',
+      }
+      const msgCtx: MessageContext = {
+        message,
+        platform: 'telegram',
+        channelId: this.config?.channelId || 'default',
       }
 
-      if (!this.messageHandler) {
-        log.debug('No message handler registered')
-        return
-      }
-
-      try {
-        const message: Message = {
-          id: ctx.message.message_id.toString(),
-          threadId: ctx.chat.id.toString(),
-          userId: ctx.message.from?.id?.toString() || 'unknown',
-          text: ctx.message.text || '',
-          timestamp: new Date(ctx.message.date * 1000),
-          channelId: this.config?.channelId || 'default',
-        }
-
-        const msgCtx: MessageContext = {
-          message,
-          platform: 'telegram',
-          channelId: this.config?.channelId || 'default',
-        }
-
-        log.debug({ threadId: message.threadId }, 'Calling message handler')
-        await this.messageHandler(msgCtx)
-        log.debug({ threadId: message.threadId }, 'Message handler completed')
-      } catch (err) {
+      this.messageHandler(msgCtx).catch((err) => {
         const errMsg = err instanceof Error ? err.message : String(err)
         const stack = err instanceof Error ? err.stack : undefined
-        log.error({ err: errMsg, stack }, 'Error in message handler')
-      }
+        log.error({ err: errMsg, stack, threadId: message.threadId }, 'Error in message handler')
+      })
     })
 
-    // Start bot in background - grammy's start() uses long polling and blocks until stopped
-    log.info('Starting bot with long polling')
-    this.bot.start().then(() => {
-      log.info('Bot stopped gracefully')
-    }).catch((err) => {
-      if (this.isRunning) {
-        log.error({ err: err instanceof Error ? err.message : String(err) }, 'Bot polling error')
+    // Inline-button taps (approval cards). Same fire-and-forget discipline
+    // as message:text — buttonHandler may resolve a pending approval which
+    // calls back into editApprovalCard; we don't want that to block grammy's
+    // sequential update queue.
+    //
+    // Telegram requires answerCallbackQuery within ~1s or the client shows
+    // a spinner. We wrap ack() so the handler can call it explicitly when
+    // it has a meaningful toast; if it doesn't, we send an empty ack at the
+    // end as a safety net (idempotent — TG ignores the second call).
+    this.bot.on('callback_query:data', (ctx) => {
+      if (!this.buttonHandler) {
+        void ctx.answerCallbackQuery({ text: '系统未就绪' }).catch(() => {})
+        return
       }
+      const data = ctx.callbackQuery.data
+      const from = ctx.callbackQuery.from
+      const msg = ctx.callbackQuery.message
+      if (!msg) {
+        void ctx.answerCallbackQuery({ text: '消息已不可用' }).catch(() => {})
+        return
+      }
+
+      let acked = false
+      const cb: ButtonCallback = {
+        data,
+        threadId: msg.chat.id.toString(),
+        userId: from.id.toString(),
+        userDisplay: from.username ? `@${from.username}` : (from.first_name || from.id.toString()),
+        messageId: msg.message_id.toString(),
+        ack: async (text?: string) => {
+          if (acked) return
+          acked = true
+          try {
+            await ctx.answerCallbackQuery(text ? { text } : undefined)
+          } catch (err) {
+            log.warn({ err: String(err) }, 'answerCallbackQuery failed')
+          }
+        },
+      }
+      this.buttonHandler(cb)
+        .catch((err) => {
+          log.error({ err: String(err), data }, 'Error in button handler')
+        })
+        .finally(() => {
+          if (!acked) {
+            // Safety net so the user's TG client doesn't keep spinning when
+            // the handler forgot to ack.
+            void ctx.answerCallbackQuery().catch(() => {})
+          }
+        })
     })
+
+    // Start bot in background. grammy's start() uses long polling and resolves
+    // only when polling stops. We wrap it in a self-healing loop so that:
+    //   1. an unexpected resolve while still isRunning → restart polling
+    //   2. a thrown error → log it and retry after a short backoff
+    // Combined with the watchdog (below), this defends against the silent
+    // wedge mode where bot.start() neither resolves nor rejects but stops
+    // fetching updates.
+    log.info('Starting bot with long polling')
     this.isRunning = true
+    void this.runPollingLoop()
+    this.startWatchdog()
     log.info('Telegram adapter started')
+  }
+
+  private async runPollingLoop(): Promise<void> {
+    while (this.isRunning && this.bot) {
+      try {
+        await this.bot.start()
+        if (this.isRunning) {
+          log.warn({ event: 'telegram.polling.unexpected_stop' },
+            'bot.start() resolved while still running; restarting in 2s')
+          await new Promise((r) => setTimeout(r, 2000))
+        } else {
+          log.info('Bot stopped gracefully')
+          return
+        }
+      } catch (err) {
+        if (!this.isRunning) return
+        log.error(
+          { err: err instanceof Error ? err.message : String(err), event: 'telegram.polling.error' },
+          'Bot polling error; restarting in 5s')
+        await new Promise((r) => setTimeout(r, 5000))
+      }
+    }
+  }
+
+  private startWatchdog(): void {
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer)
+    this.consecutivePingFailures = 0
+    this.watchdogTimer = setInterval(async () => {
+      if (!this.isRunning || !this.bot) return
+      try {
+        await this.bot.api.getMe()
+        if (this.consecutivePingFailures > 0) {
+          log.info({ event: 'telegram.watchdog.recovered' }, 'getMe ping recovered')
+        }
+        this.consecutivePingFailures = 0
+      } catch (err) {
+        this.consecutivePingFailures += 1
+        log.warn({
+          event: 'telegram.watchdog.ping_failed',
+          consecutive: this.consecutivePingFailures,
+          err: err instanceof Error ? err.message : String(err),
+        }, 'Watchdog getMe ping failed')
+        if (this.consecutivePingFailures >= TelegramAdapter.WATCHDOG_FAILURE_THRESHOLD) {
+          log.error({ event: 'telegram.watchdog.restarting_polling' },
+            'Polling appears wedged; forcing bot.stop() to trigger restart')
+          this.consecutivePingFailures = 0
+          try { await this.bot.stop() } catch { /* ignore */ }
+          // runPollingLoop will see bot.start() resolve and restart it.
+        }
+      }
+    }, TelegramAdapter.WATCHDOG_INTERVAL_MS)
   }
 
   async stop(): Promise<void> {
     this.isRunning = false
+
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer)
+      this.watchdogTimer = undefined
+    }
 
     // Clean up all typing intervals
     for (const interval of this.typingIntervals.values()) {
@@ -124,6 +243,50 @@ export class TelegramAdapter implements MessengerAdapter {
 
     for (const chunk of chunks) {
       await this.bot.api.sendMessage(threadId, chunk, { parse_mode: 'HTML' })
+    }
+  }
+
+  onButtonCallback(handler: (cb: ButtonCallback) => Promise<void>): void {
+    this.buttonHandler = handler
+  }
+
+  async sendApprovalCard(
+    threadId: string,
+    prompt: ApprovalCardPrompt,
+  ): Promise<{ messageId: string }> {
+    if (!this.bot) throw new Error('Telegram adapter not started')
+    const text = renderApprovalCardHtml(prompt)
+    const reply_markup = renderApprovalKeyboard(prompt)
+    const sent = await this.bot.api.sendMessage(threadId, text, {
+      parse_mode: 'HTML',
+      reply_markup,
+    })
+    return { messageId: sent.message_id.toString() }
+  }
+
+  async editApprovalCard(
+    threadId: string,
+    messageId: string,
+    outcome: ApprovalCardOutcome,
+  ): Promise<void> {
+    if (!this.bot) return
+    const numericId = Number.parseInt(messageId, 10)
+    if (!Number.isFinite(numericId)) {
+      log.warn({ messageId }, 'editApprovalCard: non-numeric messageId')
+      return
+    }
+    const text = renderApprovalOutcomeHtml(outcome)
+    try {
+      await this.bot.api.editMessageText(threadId, numericId, text, {
+        parse_mode: 'HTML',
+        // Omit reply_markup → buttons stay. We want to drop them, so pass
+        // an empty inline_keyboard to clear.
+        reply_markup: { inline_keyboard: [] },
+      })
+    } catch (err) {
+      // Common: "message is not modified", "message can't be edited" (>48h),
+      // "message to edit not found". All non-fatal — bus already resolved.
+      log.warn({ err: String(err), messageId }, 'editApprovalCard failed (non-fatal)')
     }
   }
 
@@ -168,5 +331,72 @@ export class TelegramAdapter implements MessengerAdapter {
   }
 }
 
-// Singleton instance
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function formatHm(d: Date): string {
+  const hh = d.getHours().toString().padStart(2, '0')
+  const mm = d.getMinutes().toString().padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+function renderApprovalCardHtml(p: ApprovalCardPrompt): string {
+  const tool = escapeHtml(p.toolName)
+  const input = escapeHtml(p.inputJson)
+  const reqShort = escapeHtml(p.reqId.slice(0, 8))
+  if (p.mode === 'auto-allow') {
+    const sec = p.graceSeconds ?? 5
+    return [
+      `⏱ <b>自动放行中</b>（${sec}s 后执行）`,
+      `工具：<b>${tool}</b>`,
+      `入参：<pre>${input}</pre>`,
+      `点 ❌ 拒绝可同时撤销该工具的自动放行规则`,
+      `<i>req: ${reqShort}</i>`,
+    ].join('\n')
+  }
+  return [
+    `🔐 <b>工具调用审批</b>`,
+    `工具：<b>${tool}</b>`,
+    `入参：<pre>${input}</pre>`,
+    `<i>req: ${reqShort}</i>`,
+  ].join('\n')
+}
+
+function renderApprovalKeyboard(p: ApprovalCardPrompt): {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>
+} {
+  const r = p.reqId
+  if (p.mode === 'auto-allow') {
+    return {
+      inline_keyboard: [[
+        { text: '❌ 拒绝（撤销规则）', callback_data: `apv:${r}:n` },
+      ]],
+    }
+  }
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ 同意', callback_data: `apv:${r}:y` },
+        { text: '❌ 拒绝', callback_data: `apv:${r}:n` },
+      ],
+      [
+        { text: '🛡 本会话自动放行同类', callback_data: `apv:${r}:a` },
+      ],
+    ],
+  }
+}
+
+function renderApprovalOutcomeHtml(o: ApprovalCardOutcome): string {
+  const t = formatHm(o.atDate)
+  const by = o.byUserDisplay ? ` · by ${escapeHtml(o.byUserDisplay)}` : ''
+  switch (o.decision) {
+    case 'allowed':         return `✅ <b>已批准</b> · ${t}${by}`
+    case 'allowed-pinned':  return `🛡 <b>已批准并加入自动放行</b> · ${t}${by}`
+    case 'denied':          return `❌ <b>已拒绝</b> · ${t}${by}`
+    case 'denied-revoked':  return `❌ <b>已拒绝并撤销自动放行</b> · ${t}${by}`
+    case 'expired':         return `⏱ <b>已过期</b> · ${t}`
+  }
+}
+
 export const telegramAdapter = new TelegramAdapter()
