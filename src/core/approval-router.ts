@@ -17,6 +17,7 @@ import {
   type ApprovalNotification,
   type Decision,
   type ResolvedInfo,
+  type ResolutionEvent,
 } from './approval-bus.js'
 import { logger as rootLogger } from './logger.js'
 
@@ -26,6 +27,12 @@ const log = rootLogger.child({ component: 'approval-router' })
  *  some IMs (older WeChat clients) start chunking aggressively past ~500
  *  chars and the y/n line at the bottom must stay visible. */
 const MAX_INPUT_PREVIEW = 400
+
+/** Truncation limit for the rich-card approval prompt. Telegram allows ~4 KB
+ *  per message; with the surrounding template (~150 chars) and a <pre>
+ *  block, 1500 fits in one bubble and covers the long tail of Bash / Edit
+ *  payloads without losing context. */
+const MAX_INPUT_PREVIEW_CARD = 1500
 
 const ALLOW_TOKENS = new Set([
   'y', 'yes', 'ok', '1', '批准', '同意', '通过', '可以', '✅',
@@ -162,7 +169,7 @@ export function install(opts: InstallOptions): void {
       const prompt: ApprovalCardPrompt = {
         reqId: n.reqId,
         toolName: n.toolName,
-        inputJson: safeStringify(n.input, MAX_INPUT_PREVIEW),
+        inputJson: safeStringify(n.input, MAX_INPUT_PREVIEW_CARD),
         mode: n.autoAllow ? 'auto-allow' : 'normal',
         graceSeconds: n.autoAllow ? Math.round(n.autoAllow.graceMs / 1000) : undefined,
       }
@@ -205,15 +212,59 @@ export function install(opts: InstallOptions): void {
       log.info({ event: 'approval.router.button_handler_bound', platform })
     }
   }
+
+  // Listen for non-user resolutions (timeout, sidecar disconnect, run
+  // terminated, shutdown, notifier error) so we can collapse the card to
+  // a terminal "已过期" state. The user-driven path (button click / y-n
+  // text reply) edits the card itself BEFORE the listener fires — by that
+  // time activeCards has already been pruned, so this listener no-ops on
+  // cause='user'. Defensive double-check via cause makes intent explicit.
+  approvalBus.setResolutionListener((e) => onBusResolution(e))
 }
 
 export function uninstall(): void {
   installed = null
   approvalBus.setNotifier(null)
+  approvalBus.setResolutionListener(null)
   activeCards.clear()
   // Note: we don't unsubscribe button handlers from messengers — tests that
   // re-install will overwrite via onButtonCallback's "replace previous"
   // contract. Production never uninstalls.
+}
+
+/**
+ * Bus-side resolution listener. Fires for every transition pending → resolved
+ * regardless of cause. We only act on non-user causes here: those are the
+ * cases where no IM-side handler updated the card, so without us the user
+ * sees a card with stale buttons.
+ *
+ * For auto-allow grace expiry that resolves to allow, we still mark the card
+ * as 'allowed' (without byUserDisplay) — the call did go through, just
+ * silently. For all other non-user causes (timeout deny, disconnect, run
+ * terminated, shutdown, notifier error), the card collapses to 'expired'.
+ */
+function onBusResolution(e: ResolutionEvent): void {
+  if (e.cause === 'user') return  // button/text path already edited
+  const card = activeCards.get(e.reqId)
+  if (!card) return  // text-fallback path doesn't track cards
+  activeCards.delete(e.reqId)
+  if (!installed) return
+  const m = installed.resolveMessenger(card.platform)
+  if (!m?.editApprovalCard) return
+
+  let decision: import('./types.js').ApprovalCardOutcome['decision']
+  if (e.cause === 'timeout' && e.decision.behavior === 'allow') {
+    // auto-allow grace fired silently
+    decision = 'allowed'
+  } else {
+    decision = 'expired'
+  }
+  m.editApprovalCard(card.threadId, card.messageId, {
+    decision,
+    atDate: new Date(),
+  }).catch((err) => {
+    log.warn({ event: 'approval.router.bus_edit_failed', reqId: e.reqId, err: String(err) })
+  })
 }
 
 /**

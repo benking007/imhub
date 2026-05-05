@@ -112,6 +112,25 @@ export class TelegramAdapter implements MessengerAdapter {
         return
       }
 
+      // Optional allowlist gate. Empty / missing list = allow anyone (matches
+      // the text-reply path). When configured, refuse with a toast — the
+      // refusal does NOT resolve the pending, so an authorized user can
+      // still click later.
+      const allowlist = this.config?.approvalAllowlist
+      if (allowlist && allowlist.length > 0) {
+        const fromIdStr = from.id.toString()
+        if (!allowlist.includes(fromIdStr)) {
+          log.warn({
+            event: 'telegram.approval.unauthorized_click',
+            userId: fromIdStr,
+            username: from.username,
+            chatType: msg.chat.type,
+            chatId: msg.chat.id,
+          }, 'Unauthorized button click rejected by allowlist')
+          void ctx.answerCallbackQuery({ text: '无权审批此请求' }).catch(() => {})
+          return
+        }
+      }
       let acked = false
       const cb: ButtonCallback = {
         data,

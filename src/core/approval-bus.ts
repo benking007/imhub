@@ -21,8 +21,22 @@ import { logger as rootLogger } from './logger.js'
 
 const log = rootLogger.child({ component: 'approval-bus' })
 
-const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
+// Bumped from 5 min to 30 min so slower IM channels (e.g. Telegram, where
+// notifications can land minutes after the bot.api.sendMessage logs success)
+// have time to round-trip a y/n reply. Aligned with Claude's own 30 min hard
+// timeout so we never outlive the underlying agent process.
+const DEFAULT_APPROVAL_TIMEOUT_MS = parseEnvMs(
+  process.env.IMHUB_APPROVAL_TIMEOUT_MS,
+  30 * 60 * 1000,
+)
 const DEFAULT_AUTO_ALLOW_GRACE_MS = 5 * 1000
+
+function parseEnvMs(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  return n
+}
 const MAX_LINE_BYTES = 256 * 1024
 const MAX_BUFFER_BYTES = MAX_LINE_BYTES * 4
 
@@ -79,11 +93,45 @@ export interface ResolvedInfo {
   wasAutoAllow: boolean
 }
 
+/** Why an approval was resolved. Used by ResolutionListener consumers (e.g.
+ *  approval-router) to decide whether to edit a UI card to "expired" — only
+ *  non-`user` causes need cleanup, since the user-driven path (button click /
+ *  text reply) edits the card itself before the listener fires. */
+export type ResolutionCause =
+  | 'user'             // explicit decision via resolvePending
+  | 'timeout'          // bus timer fired — auto-allow grace expiry (allow) or normal timeout (deny)
+  | 'sidecar-disconnect'
+  | 'run-terminated'
+  | 'shutdown'
+  | 'notifier-error'
+
+/** Fired exactly once per pending when it transitions from pending → resolved.
+ *  Mirrors the wire decision sent to sidecar/dispatch but adds context (cause,
+ *  threadId, platform) so listeners can route side-effects without scanning
+ *  bus internals. Synchronous; listener errors are logged + swallowed. */
+export interface ResolutionEvent {
+  reqId: string
+  runId: string
+  threadId: string
+  platform: string
+  toolName: string
+  fingerprint: string
+  decision: Decision
+  wasAutoAllow: boolean
+  cause: ResolutionCause
+}
+
+export type ResolutionListener = (e: ResolutionEvent) => void
+
 interface PendingApproval {
   runId: string
   reqId: string
   toolName: string
   threadId: string
+  /** Cached at registration so cancelPending can fire ResolutionListener with
+   *  a valid platform even when the underlying runContext has already been
+   *  cleared (e.g. unregisterRun deletes the context BEFORE cancelling). */
+  platform: string
   /** Truncated input fingerprint used for auto-allow lookups + revocation. */
   fingerprint: string
   /** Set when the pending was created from a unix-socket sidecar (Claude
@@ -122,6 +170,7 @@ export class ApprovalBus {
   private pendingByThread = new Map<string, PendingApproval[]>()
   private connections = new Set<Socket>()
   private notifier: ApprovalNotifier | null = null
+  private resolutionListener: ResolutionListener | null = null
   /** threadId → set of `${toolName}::${prefix}` keys the user has marked
    *  as auto-allow within this conversation. Cleared by clearAutoAllowForThread
    *  (called from session.resetConversation) and on stop(). */
@@ -135,6 +184,15 @@ export class ApprovalBus {
   /** 注入"通知 IM 推送"的回调。messenger 层启动时调一次。 */
   setNotifier(n: ApprovalNotifier | null): void {
     this.notifier = n
+  }
+
+  /** Subscribe to resolution events. Replaces any previous listener.
+   *  approval-router uses this to keep its UI cards in sync with bus-side
+   *  cancellations (timeout / sidecar disconnect / run terminated). The
+   *  user-driven path (button or y/n text) already edits its own card; the
+   *  listener still fires there with cause='user' so consumers can dedup. */
+  setResolutionListener(l: ResolutionListener | null): void {
+    this.resolutionListener = l
   }
 
   /** 启动 unix socket 服务。返回最终使用的 socket 路径。 */
@@ -160,7 +218,7 @@ export class ApprovalBus {
   async stop(): Promise<void> {
     // Reject everything still pending
     for (const p of [...this.pendingById.values()]) {
-      this.cancelPending(p, { behavior: 'deny', message: 'approval-bus shutting down' })
+      this.cancelPending(p, { behavior: 'deny', message: 'approval-bus shutting down' }, 'shutdown')
     }
     this.runContexts.clear()
     this.pendingById.clear()
@@ -198,7 +256,7 @@ export class ApprovalBus {
     this.runContexts.delete(runId)
     for (const p of [...this.pendingById.values()]) {
       if (p.runId === runId) {
-        this.cancelPending(p, { behavior: 'deny', message: 'run terminated' })
+        this.cancelPending(p, { behavior: 'deny', message: 'run terminated' }, 'run-terminated')
       }
     }
   }
@@ -244,7 +302,7 @@ export class ApprovalBus {
     if (decision.behavior === 'deny' && head.autoAllow) {
       this.removeAutoAllowRule(head.threadId, head.toolName, head.fingerprint)
     }
-    this.cancelPending(head, decision)
+    this.cancelPending(head, decision, 'user')
     return info
   }
 
@@ -300,7 +358,7 @@ export class ApprovalBus {
       // sidecar 掉线：相关 pending 全 deny（claude 那边大概率也已经死了，写不写都无所谓）
       for (const p of [...this.pendingById.values()]) {
         if (p.socket === socket) {
-          this.cancelPending(p, { behavior: 'deny', message: 'sidecar disconnected' })
+          this.cancelPending(p, { behavior: 'deny', message: 'sidecar disconnected' }, 'sidecar-disconnect')
         }
       }
     })
@@ -454,6 +512,7 @@ export class ApprovalBus {
       reqId: args.reqId,
       toolName: args.toolName,
       threadId: args.ctx.threadId,
+      platform: args.ctx.platform,
       fingerprint,
       socket: 'socket' in transport ? transport.socket : undefined,
       dispatch: 'dispatch' in transport ? transport.dispatch : undefined,
@@ -461,9 +520,9 @@ export class ApprovalBus {
       autoAllow: isAutoAllow,
       timer: setTimeout(() => {
         if (isAutoAllow) {
-          this.cancelPending(pending, { behavior: 'allow' })
+          this.cancelPending(pending, { behavior: 'allow' }, 'timeout')
         } else {
-          this.cancelPending(pending, { behavior: 'deny', message: 'approval timeout' })
+          this.cancelPending(pending, { behavior: 'deny', message: 'approval timeout' }, 'timeout')
         }
       }, timeoutMs),
     }
@@ -487,11 +546,11 @@ export class ApprovalBus {
       })
     } catch (err) {
       log.error({ event: 'approval.bus.notifier_error', reqId: args.reqId, err: String(err) })
-      this.cancelPending(pending, { behavior: 'deny', message: 'notifier error' })
+      this.cancelPending(pending, { behavior: 'deny', message: 'notifier error' }, 'notifier-error')
     }
   }
 
-  private cancelPending(p: PendingApproval, decision: Decision): void {
+  private cancelPending(p: PendingApproval, decision: Decision, cause: ResolutionCause = 'sidecar-disconnect'): void {
     if (p.resolved) return
     p.resolved = true
     clearTimeout(p.timer)
@@ -519,6 +578,27 @@ export class ApprovalBus {
     }
     // (Neither set is impossible — _registerPending guarantees one of the two.)
     this.removePending(p)
+
+    // Fire resolution listener last so subscribers see fully-cleaned state
+    // (pending already removed, rules already updated). Listener errors are
+    // isolated — the bus must not crash on a bad subscriber.
+    if (this.resolutionListener) {
+      try {
+        this.resolutionListener({
+          reqId: p.reqId,
+          runId: p.runId,
+          threadId: p.threadId,
+          platform: p.platform,
+          toolName: p.toolName,
+          fingerprint: p.fingerprint,
+          decision,
+          wasAutoAllow: p.autoAllow,
+          cause,
+        })
+      } catch (err) {
+        log.warn({ event: 'approval.bus.listener_error', reqId: p.reqId, err: String(err) })
+      }
+    }
   }
 
   private addAutoAllowRule(threadId: string, toolName: string, fingerprint: string): void {
